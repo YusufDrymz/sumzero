@@ -13,10 +13,7 @@ import (
 
 func TestIdempotencyStoreLifecycle(t *testing.T) {
 	ctx := context.Background()
-	pool := startPostgres(t)
-	_, err := pool.Exec(ctx, mustRead(t, "0002_idempotency.sql"))
-	require.NoError(t, err)
-	store := ledger.NewIdempotencyStore(pool, time.Hour)
+	store := ledger.NewIdempotencyStore(startPostgres(t), time.Hour)
 
 	res, _, err := store.Begin(ctx, "k")
 	require.NoError(t, err)
@@ -45,8 +42,6 @@ func TestIdempotencyStoreLifecycle(t *testing.T) {
 func TestIdempotencyStoreExpiryClearsOldResponse(t *testing.T) {
 	ctx := context.Background()
 	pool := startPostgres(t)
-	_, err := pool.Exec(ctx, mustRead(t, "0002_idempotency.sql"))
-	require.NoError(t, err)
 	store := ledger.NewIdempotencyStore(pool, time.Hour)
 
 	res, _, err := store.Begin(ctx, "k")
@@ -72,15 +67,13 @@ func TestIdempotencyStoreExpiryClearsOldResponse(t *testing.T) {
 func TestIdempotencyStoreSweep(t *testing.T) {
 	ctx := context.Background()
 	pool := startPostgres(t)
-	_, err := pool.Exec(ctx, mustRead(t, "0002_idempotency.sql"))
-	require.NoError(t, err)
 	store := ledger.NewIdempotencyStore(pool, time.Hour)
 
 	for _, k := range []string{"a", "b", "c"} {
 		_, _, err := store.Begin(ctx, k)
 		require.NoError(t, err)
 	}
-	_, err = pool.Exec(ctx, `UPDATE idempotency_keys SET expires_at = now() - interval '1 second' WHERE key IN ('a', 'b')`)
+	_, err := pool.Exec(ctx, `UPDATE idempotency_keys SET expires_at = now() - interval '1 second' WHERE key IN ('a', 'b')`)
 	require.NoError(t, err)
 
 	n, err := store.Sweep(ctx)

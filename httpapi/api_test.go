@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -57,11 +58,14 @@ func newServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	for _, f := range []string{"0001_init.sql", "0002_idempotency.sql"} {
-		sql, err := os.ReadFile(filepath.Join("..", "migrations", f))
+	files, err := filepath.Glob(filepath.Join("..", "migrations", "*.sql"))
+	require.NoError(t, err)
+	sort.Strings(files)
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
 		require.NoError(t, err)
 		_, err = pool.Exec(ctx, string(sql))
-		require.NoError(t, err)
+		require.NoError(t, err, f)
 	}
 
 	srv := httptest.NewServer(httpapi.New(pool, ledger.NewIdempotencyStore(pool, time.Hour), nil))

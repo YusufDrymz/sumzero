@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -55,17 +56,24 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	_, err = pool.Exec(ctx, mustRead(t, "0001_init.sql"))
-	require.NoError(t, err)
-
+	applyMigrations(t, pool)
 	return pool
 }
 
-func mustRead(t *testing.T, migration string) string {
+// applyMigrations runs every file under migrations/ in name order, the way a
+// deployment would.
+func applyMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	b, err := os.ReadFile(filepath.Join("..", "migrations", migration))
+	files, err := filepath.Glob(filepath.Join("..", "migrations", "*.sql"))
 	require.NoError(t, err)
-	return string(b)
+	require.NotEmpty(t, files)
+	sort.Strings(files)
+	for _, f := range files {
+		sql, err := os.ReadFile(f)
+		require.NoError(t, err)
+		_, err = pool.Exec(context.Background(), string(sql))
+		require.NoError(t, err, f)
+	}
 }
 
 // openBooks sets up a small chart of accounts used by most tests.
