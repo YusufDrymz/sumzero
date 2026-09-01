@@ -9,9 +9,9 @@ REST API. Same engine either way.
 [![CI](https://github.com/YusufDrymz/sumzero/actions/workflows/ci.yml/badge.svg)](https://github.com/YusufDrymz/sumzero/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Status: early.** The engine works against Postgres and is tested there. The
-> REST API and the `verify` command are not written yet. Not ready for anyone's
-> money — see [Roadmap](#roadmap).
+> **Status: early.** The engine and `verify` work against Postgres and are
+> tested there. The REST API is not written yet. Not ready for anyone's money —
+> see [Roadmap](#roadmap).
 
 ## Why
 
@@ -43,7 +43,8 @@ proves the record is intact. What that means for your books is your domain.
 ## Install
 
 ```bash
-go get github.com/YusufDrymz/sumzero
+go get github.com/YusufDrymz/sumzero              # library
+go install github.com/YusufDrymz/sumzero/cmd/sumzero@latest   # CLI
 ```
 
 ## Usage
@@ -99,6 +100,33 @@ Account types and the side they carry a positive balance on:
 | `Asset`, `Expense` | debit |
 | `Liability`, `Equity`, `Income` | credit |
 
+## Verify
+
+`account_balances` is a cache, so the tool refuses to trust it:
+
+```console
+$ sumzero verify --dsn postgres://...
+14 accounts, 2841 transfers, 7106 postings (243ms)
+ok: balances match the postings and the chain is intact
+```
+
+Every balance is recomputed from the postings, every transfer is re-checked for
+sum zero, and the hash chain is walked from the first row. When something is
+wrong it says what and where:
+
+```console
+$ sumzero verify
+14 accounts, 2841 transfers, 7106 postings (251ms)
+
+3 problem(s):
+  balance-drift cash: cached 918400, postings say 918300 (off by 100)
+  hash-mismatch transfer 1904 (order-7781): stored hash does not describe the stored postings
+  trial-balance TRY: accounts sum to 100, expected 0
+```
+
+Exit codes: `0` clean, `1` problems found, `2` the check could not run — so it
+works as a cron job or a CI step. Add `--json` for machine output.
+
 ## Schema
 
 Four tables: `accounts`, `transfers`, `postings`, `account_balances`. See
@@ -114,8 +142,8 @@ recomputes every balance from them and re-walks the hash chain.
 |-------|----------|-------|
 | 1 | Domain model, sum-zero invariant, schema, hash chain | done |
 | 2 | Postgres store: post, balance, as-of, statement, embedded mode | done |
-| 3 | `verify`: recompute balances, re-walk the chain | next |
-| 4 | REST API with mandatory idempotency keys | |
+| 3 | `verify`: recompute balances, re-walk the chain | done |
+| 4 | REST API with mandatory idempotency keys | next |
 | 5 | Reconciliation against external records | |
 
 ## Throughput
@@ -167,6 +195,10 @@ aralığı mimari olarak yok.
 **Yazma serileşir:** hash zinciri tek sıra olduğu için `Post` link atarken kilit
 alır. Tavan, transfer başına bir Postgres round-trip'i civarı — kendi
 ödemelerini kaydeden bir servise uygun, borsa hacmine değil (ADR-0003).
+
+**`sumzero verify`** cache'e güvenmez: her bakiyeyi posting'lerden yeniden
+hesaplar, her transferi sum-zero için yeniden kontrol eder, hash zincirini baştan
+yürür. Çıkış kodları cron/CI için: 0 temiz, 1 sorun var, 2 kontrol koşamadı.
 
 **Kapsam dışı:** Bu bir muhasebe sistemi değil, posting motoru. Vergi kuralları,
 resmi raporlar, hesap planı şablonları, döviz kuru kaynağı yok. Ne hareket
