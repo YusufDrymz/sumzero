@@ -1,8 +1,8 @@
 # Changelog
 
-## Unreleased
+## 0.1.0 — 2026-09-01
 
-First cut. Everything below is new.
+First release. Everything below is new.
 
 ### Engine (`ledger`)
 - Accounts with a fixed currency and a normal side; archive instead of delete.

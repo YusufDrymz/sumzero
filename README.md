@@ -9,9 +9,9 @@ REST API. Same engine either way.
 [![CI](https://github.com/YusufDrymz/sumzero/actions/workflows/ci.yml/badge.svg)](https://github.com/YusufDrymz/sumzero/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Status: early.** Engine, REST API, `verify` and `reconcile` work against
-> Postgres and are tested there. No release yet, and no one has run it in anger.
-> Not ready for anyone's money — see [Roadmap](#roadmap).
+> **Status: v0.1.0.** Engine, REST API, `verify` and `reconcile` work against
+> Postgres and are tested there on 16 and 17. Nobody has run it in anger yet.
+> Treat it accordingly — see [Roadmap](#roadmap).
 
 ## Why
 
@@ -219,7 +219,8 @@ recomputes every balance from them and re-walks the hash chain.
 | 3 | `verify`: recompute balances, re-walk the chain | done |
 | 4 | REST API with mandatory idempotency keys | done |
 | 5 | Reconciliation against external records | done |
-| 6 | First release: read-through of every file, tag, go public | next |
+| 6 | v0.1.0 | done |
+| 7 | Holds, multi-currency accounts, per-book chains | later |
 
 ## Throughput
 
