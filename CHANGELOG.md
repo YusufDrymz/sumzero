@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.2.0 — 2026-09-01
 
 ### Added
 - Holds: `Hold`, `Capture`, `Release`, `ExpireHolds`, `Available`; the

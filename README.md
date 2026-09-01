@@ -9,7 +9,7 @@ REST API. Same engine either way.
 [![CI](https://github.com/YusufDrymz/sumzero/actions/workflows/ci.yml/badge.svg)](https://github.com/YusufDrymz/sumzero/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Status: v0.1.0.** Engine, REST API, `verify` and `reconcile` work against
+> **Status: v0.2.0.** Engine, REST API, `verify` and `reconcile` work against
 > Postgres and are tested there on 16 and 17. Nobody has run it in anger yet.
 > Treat it accordingly — see [Roadmap](#roadmap).
 
