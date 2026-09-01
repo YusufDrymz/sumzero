@@ -27,6 +27,14 @@ func chainDigest(prev []byte, t *Transfer, postedAt time.Time) []byte {
 	binary.BigEndian.PutUint64(ts[:], uint64(postedAt.UTC().Truncate(time.Microsecond).UnixNano()))
 	h.Write(ts[:])
 
+	// Only reversals carry this field, and it is hashed only when present, so
+	// every digest written before it existed still verifies.
+	if t.Reverses != 0 {
+		var rev [8]byte
+		binary.BigEndian.PutUint64(rev[:], uint64(t.Reverses))
+		writeField(h, rev[:])
+	}
+
 	for _, p := range t.Postings {
 		writeField(h, []byte(p.Account))
 		writeField(h, []byte(p.Amount.Currency))

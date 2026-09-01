@@ -21,4 +21,6 @@ var (
 	ErrUnknownHold        = errors.New("sumzero: unknown hold")
 	ErrHoldNotActive      = errors.New("sumzero: hold is not active")
 	ErrCaptureMismatch    = errors.New("sumzero: transfer does not capture the hold")
+	ErrHoldExpired        = errors.New("sumzero: hold has expired")
+	ErrAlreadyReversed    = errors.New("sumzero: transfer is already reversed")
 )

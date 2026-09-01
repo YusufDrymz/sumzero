@@ -25,6 +25,10 @@ type Transfer struct {
 	// PostedAt is the ledger date. Zero means "now" at write time. It may be
 	// backdated, which is why as-of queries order by this and not by row id.
 	PostedAt time.Time `json:"posted_at"`
+
+	// Reverses is the id of the transfer this one undoes, when it is a
+	// reversal. Set by Reverse, not by callers.
+	Reverses int64 `json:"reverses,omitempty"`
 }
 
 // Debit adds a debit leg. Chainable.

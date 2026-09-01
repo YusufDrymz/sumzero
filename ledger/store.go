@@ -163,13 +163,20 @@ func (l *Ledger) post(ctx context.Context, q db, t *Transfer, excludeHold int64)
 		return 0, err
 	}
 
+	var reverses any
+	if t.Reverses != 0 {
+		reverses = t.Reverses
+	}
 	var id int64
 	err = q.QueryRow(ctx, `
-		INSERT INTO transfers (reference, description, posted_at, prev_hash, hash)
-		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-		t.Reference, t.Description, postedAt, prev, chainDigest(prev, t, postedAt)).Scan(&id)
+		INSERT INTO transfers (reference, description, posted_at, prev_hash, hash, reverses_transfer_id)
+		VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+		t.Reference, t.Description, postedAt, prev, chainDigest(prev, t, postedAt), reverses).Scan(&id)
 	if err != nil {
 		if isUniqueViolation(err) {
+			if t.Reverses != 0 && uniqueViolationOn(err, "transfers_reverses_key") {
+				return 0, fmt.Errorf("%w: transfer %d", ErrAlreadyReversed, t.Reverses)
+			}
 			return 0, fmt.Errorf("%w: %s", ErrDuplicateReference, t.Reference)
 		}
 		return 0, err
@@ -296,4 +303,37 @@ const chainLockKey int64 = 0x53554D5A45524F31 // "SUMZERO1"
 func isUniqueViolation(err error) bool {
 	var pgErr *pgconn.PgError
 	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+func uniqueViolationOn(err error, constraint string) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.ConstraintName == constraint
+}
+
+// Reverse posts the mirror image of an earlier transfer: same accounts, same
+// amounts, every leg flipped. The new transfer is linked to the original and
+// the original can only be reversed once. The overdraft guard applies as it
+// would to any transfer — undoing a payout into a guarded wallet is fine,
+// undoing a top-up out of an empty one is not.
+func (l *Ledger) Reverse(ctx context.Context, reference, newReference, description string) (int64, error) {
+	if newReference == "" {
+		return 0, ErrMissingReference
+	}
+	orig, origID, err := l.TransferByReference(ctx, reference)
+	if err != nil {
+		return 0, err
+	}
+	if description == "" {
+		description = "reversal of " + reference
+	}
+
+	rev := &Transfer{Reference: newReference, Description: description, Reverses: origID}
+	for _, p := range orig.Postings {
+		dir := Credit
+		if p.Dir == Credit {
+			dir = Debit
+		}
+		rev.Postings = append(rev.Postings, Posting{Account: p.Account, Amount: p.Amount, Dir: dir})
+	}
+	return l.Post(ctx, rev)
 }

@@ -159,6 +159,7 @@ func (l *Ledger) checkTrialBalance(ctx context.Context, r *Report) error {
 func (l *Ledger) checkChain(ctx context.Context, r *Report) error {
 	rows, err := l.db.Query(ctx, `
 		SELECT t.id, t.reference, t.description, t.posted_at, t.prev_hash, t.hash,
+		       coalesce(t.reverses_transfer_id, 0),
 		       p.account_id, p.amount, p.currency, p.direction
 		FROM transfers t LEFT JOIN postings p ON p.transfer_id = t.id
 		ORDER BY t.id, p.id`)
@@ -199,21 +200,21 @@ func (l *Ledger) checkChain(ctx context.Context, r *Report) error {
 
 	for rows.Next() {
 		var (
-			id                     int64
+			id, reverses           int64
 			reference, description string
 			at                     time.Time
 			prev, hash             []byte
 			account, currency, dir *string
 			amount                 *int64
 		)
-		if err := rows.Scan(&id, &reference, &description, &at, &prev, &hash,
+		if err := rows.Scan(&id, &reference, &description, &at, &prev, &hash, &reverses,
 			&account, &amount, &currency, &dir); err != nil {
 			return err
 		}
 
 		if cur == nil || id != curID {
 			flush()
-			cur = &Transfer{Reference: reference, Description: description}
+			cur = &Transfer{Reference: reference, Description: description, Reverses: reverses}
 			curID, postedAt, prevHash, storedHash = id, at, prev, hash
 		}
 		if account != nil {

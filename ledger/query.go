@@ -152,14 +152,19 @@ func (l *Ledger) TransferByReference(ctx context.Context, reference string) (Tra
 		id int64
 		t  Transfer
 	)
+	var reverses *int64
 	err := l.db.QueryRow(ctx, `
-		SELECT id, reference, description, posted_at FROM transfers WHERE reference = $1`,
-		reference).Scan(&id, &t.Reference, &t.Description, &t.PostedAt)
+		SELECT id, reference, description, posted_at, reverses_transfer_id
+		FROM transfers WHERE reference = $1`,
+		reference).Scan(&id, &t.Reference, &t.Description, &t.PostedAt, &reverses)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Transfer{}, 0, fmt.Errorf("%w: %s", ErrUnknownTransfer, reference)
 	}
 	if err != nil {
 		return Transfer{}, 0, err
+	}
+	if reverses != nil {
+		t.Reverses = *reverses
 	}
 
 	rows, err := l.db.Query(ctx, `

@@ -119,7 +119,10 @@ func (l *Ledger) Capture(ctx context.Context, holdReference string, t *Transfer)
 		return 0, err
 	}
 
-	var id int64
+	var (
+		id      int64
+		expired int64
+	)
 	err := l.inTx(ctx, func(q db) error {
 		h, err := lockHold(ctx, q, holdReference)
 		if err != nil {
@@ -127,6 +130,12 @@ func (l *Ledger) Capture(ctx context.Context, holdReference string, t *Transfer)
 		}
 		if h.Status != HoldActive {
 			return fmt.Errorf("%w: hold %s is %s", ErrHoldNotActive, holdReference, h.Status)
+		}
+		// The sweep marks expiry lazily; capture must not depend on it having
+		// run. A past-due hold is expired the moment someone tries to use it.
+		if h.ExpiresAt != nil && !h.ExpiresAt.After(time.Now()) {
+			expired = h.ID
+			return fmt.Errorf("%w: hold %s expired at %s", ErrHoldExpired, holdReference, h.ExpiresAt.Format(time.RFC3339))
 		}
 
 		acc, err := lockAccount(ctx, q, h.Account)
@@ -159,6 +168,17 @@ func (l *Ledger) Capture(ctx context.Context, holdReference string, t *Transfer)
 			WHERE id = $1`, h.ID, id)
 		return err
 	})
+	if expired != 0 {
+		// The refusal rolled the transaction back, so mark the expiry outside
+		// it: the hold should stop reserving now, not at the next sweep. In
+		// embedded mode this lands in the caller's transaction and follows
+		// its fate, which is the best that can be done from inside it.
+		if _, mErr := l.db.Exec(ctx, `
+			UPDATE holds SET status = 'expired', closed_at = now()
+			WHERE id = $1 AND status = 'active'`, expired); mErr != nil {
+			return 0, errors.Join(err, mErr)
+		}
+	}
 	return id, err
 }
 
