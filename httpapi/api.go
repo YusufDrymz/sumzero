@@ -5,10 +5,12 @@
 package httpapi
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"log/slog"
 	"net/http"
+	"strings"
 	"time"
 
 	idempotent "github.com/YusufDrymz/go-idempotent"
@@ -27,9 +29,23 @@ type server struct {
 	log  *slog.Logger
 }
 
+// Config is what the HTTP layer needs beyond the database.
+type Config struct {
+	Keys idempotent.Store
+	Log  *slog.Logger
+
+	// Token, when set, is required as "Authorization: Bearer <token>" on every
+	// /v1 route. Health and readiness stay open. Empty means no auth — the
+	// caller is expected to put a gateway in front, and /v1/verify is
+	// disabled because an unauthenticated full scan is a denial-of-service
+	// invitation.
+	Token string
+}
+
 // New builds the router. Writes go through the idempotency middleware; reads do
 // not need it.
-func New(pool *pgxpool.Pool, keys idempotent.Store, log *slog.Logger) http.Handler {
+func New(pool *pgxpool.Pool, cfg Config) http.Handler {
+	log := cfg.Log
 	if log == nil {
 		log = slog.Default()
 	}
@@ -54,21 +70,52 @@ func New(pool *pgxpool.Pool, keys idempotent.Store, log *slog.Logger) http.Handl
 	mux.HandleFunc("GET /v1/accounts/{id}/statement", s.getStatement)
 	mux.HandleFunc("POST /v1/accounts/{id}/reconcile", s.reconcile)
 	mux.HandleFunc("GET /v1/transfers/{reference}", s.getTransfer)
-	mux.HandleFunc("GET /v1/verify", s.verify)
+	if cfg.Token != "" {
+		mux.HandleFunc("GET /v1/verify", s.verify)
+	} else {
+		mux.HandleFunc("GET /v1/verify", func(w http.ResponseWriter, r *http.Request) {
+			writeErrorCode(w, http.StatusForbidden, "verify_disabled",
+				"GET /v1/verify is only served when the API has a token; run `sumzero verify` instead")
+		})
+	}
 
 	// The write paths: the key is mandatory here, and the middleware replays a
 	// stored response when the same key comes back.
-	keyed := idempotent.New(keys)
+	keyed := idempotent.New(cfg.Keys)
 	for pattern, h := range map[string]http.HandlerFunc{
-		"POST /v1/transfers":                 s.postTransfer,
-		"POST /v1/holds":                     s.postHold,
-		"POST /v1/holds/{reference}/capture": s.captureHold,
-		"POST /v1/holds/{reference}/release": s.releaseHold,
+		"POST /v1/transfers":                     s.postTransfer,
+		"POST /v1/transfers/{reference}/reverse": s.reverseTransfer,
+		"POST /v1/holds":                         s.postHold,
+		"POST /v1/holds/{reference}/capture":     s.captureHold,
+		"POST /v1/holds/{reference}/release":     s.releaseHold,
 	} {
 		mux.Handle(pattern, requireIdempotencyKey(keyed(h)))
 	}
 
-	return mux
+	if cfg.Token == "" {
+		return mux
+	}
+	return requireBearer(cfg.Token, mux)
+}
+
+// requireBearer guards every /v1 route with a constant-time token check.
+// /healthz and /readyz stay open: the orchestrator probing them has no token
+// and needs none.
+func requireBearer(token string, next http.Handler) http.Handler {
+	want := []byte("Bearer " + token)
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !strings.HasPrefix(r.URL.Path, "/v1/") {
+			next.ServeHTTP(w, r)
+			return
+		}
+		got := []byte(r.Header.Get("Authorization"))
+		if len(got) != len(want) || subtle.ConstantTimeCompare(got, want) != 1 {
+			w.Header().Set("WWW-Authenticate", `Bearer realm="sumzero"`)
+			writeErrorCode(w, http.StatusUnauthorized, "unauthorized", "missing or invalid bearer token")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 // requireIdempotencyKey rejects a write that arrives without a key.
@@ -78,11 +125,16 @@ func New(pool *pgxpool.Pool, keys idempotent.Store, log *slog.Logger) http.Handl
 // story is a bug waiting for a timeout.
 func requireIdempotencyKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Header.Get(IdempotencyHeader) == "" {
+		key := r.Header.Get(IdempotencyHeader)
+		if key == "" {
 			badRequest(w, "missing_idempotency_key",
 				"writes require an "+IdempotencyHeader+" header")
 			return
 		}
+		// The library fingerprints the body, not the route. Scoping the key to
+		// the route keeps "same key, same body, different endpoint" from
+		// replaying the wrong endpoint's answer.
+		r.Header.Set(IdempotencyHeader, r.Method+" "+r.URL.Path+" "+key)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -310,6 +362,29 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusCreated, transferResponse{ID: id, Transfer: t})
+}
+
+type reverseRequest struct {
+	Reference   string `json:"reference"`
+	Description string `json:"description"`
+}
+
+func (s *server) reverseTransfer(w http.ResponseWriter, r *http.Request) {
+	var req reverseRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	id, err := s.lg.Reverse(r.Context(), r.PathValue("reference"), req.Reference, req.Description)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	t, _, err := s.lg.TransferByReference(r.Context(), req.Reference)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, transferResponse{ID: id, Transfer: &t})
 }
 
 func (s *server) getTransfer(w http.ResponseWriter, r *http.Request) {

@@ -33,6 +33,8 @@ var statusOf = []struct {
 	{ledger.ErrDuplicateReference, http.StatusConflict, "duplicate_reference"},
 	{ledger.ErrUnknownHold, http.StatusNotFound, "unknown_hold"},
 	{ledger.ErrHoldNotActive, http.StatusConflict, "hold_not_active"},
+	{ledger.ErrHoldExpired, http.StatusConflict, "hold_expired"},
+	{ledger.ErrAlreadyReversed, http.StatusConflict, "already_reversed"},
 	{ledger.ErrInsufficientFunds, http.StatusUnprocessableEntity, "insufficient_funds"},
 	{ledger.ErrCaptureMismatch, http.StatusUnprocessableEntity, "capture_mismatch"},
 	{ledger.ErrAccountArchived, http.StatusUnprocessableEntity, "account_archived"},
@@ -69,9 +71,13 @@ func writeError(w http.ResponseWriter, err error) {
 }
 
 func badRequest(w http.ResponseWriter, code, message string) {
+	writeErrorCode(w, http.StatusBadRequest, code, message)
+}
+
+func writeErrorCode(w http.ResponseWriter, status int, code, message string) {
 	var body errorBody
 	body.Error.Code, body.Error.Message = code, message
-	writeJSON(w, http.StatusBadRequest, body)
+	writeJSON(w, status, body)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v any) {

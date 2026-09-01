@@ -8,8 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"path/filepath"
-	"sort"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -23,6 +22,7 @@ import (
 
 	"github.com/YusufDrymz/sumzero/httpapi"
 	"github.com/YusufDrymz/sumzero/ledger"
+	"github.com/YusufDrymz/sumzero/migrations"
 )
 
 func newServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
@@ -58,20 +58,17 @@ func newServer(t *testing.T) (*httptest.Server, *pgxpool.Pool) {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	files, err := filepath.Glob(filepath.Join("..", "migrations", "*.sql"))
+	_, err = migrations.Apply(ctx, pool)
 	require.NoError(t, err)
-	sort.Strings(files)
-	for _, f := range files {
-		sql, err := os.ReadFile(f)
-		require.NoError(t, err)
-		_, err = pool.Exec(ctx, string(sql))
-		require.NoError(t, err, f)
-	}
 
-	srv := httptest.NewServer(httpapi.New(pool, ledger.NewIdempotencyStore(pool, time.Hour), nil))
+	srv := httptest.NewServer(httpapi.New(pool, httpapi.Config{
+		Keys: ledger.NewIdempotencyStore(pool, time.Hour), Token: testToken,
+	}))
 	t.Cleanup(srv.Close)
 	return srv, pool
 }
+
+const testToken = "t0k3n"
 
 type call struct {
 	status int
@@ -89,6 +86,9 @@ func do(t *testing.T, srv *httptest.Server, method, path, key string, payload an
 	require.NoError(t, err)
 	if key != "" {
 		req.Header.Set(httpapi.IdempotencyHeader, key)
+	}
+	if strings.HasPrefix(path, "/v1/") {
+		req.Header.Set("Authorization", "Bearer "+testToken)
 	}
 	resp, err := srv.Client().Do(req)
 	require.NoError(t, err)
@@ -421,4 +421,62 @@ func TestHoldsOverHTTP(t *testing.T) {
 		require.Equal(t, http.StatusCreated, second.status)
 		require.Equal(t, "true", second.header.Get(idempotent.ReplayHeader))
 	})
+}
+
+func TestBearerAndVerifyRules(t *testing.T) {
+	srv, pool := newServer(t)
+
+	req, _ := http.NewRequest("GET", srv.URL+"/v1/accounts/x", nil)
+	resp, err := srv.Client().Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode, "no token, no service")
+	require.Contains(t, resp.Header.Get("WWW-Authenticate"), "Bearer")
+
+	req.Header.Set("Authorization", "Bearer wrong")
+	resp, err = srv.Client().Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+	require.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+
+	require.Equal(t, http.StatusOK, do(t, srv, "GET", "/healthz", "", nil).status, "probes stay open")
+	require.Equal(t, http.StatusOK, do(t, srv, "GET", "/v1/verify", "", nil).status, "verify is served with a token")
+
+	// Without a token the API is open, and verify is off.
+	open := httptest.NewServer(httpapi.New(pool, httpapi.Config{Keys: ledger.NewIdempotencyStore(pool, time.Hour)}))
+	defer open.Close()
+	r, err := http.Get(open.URL + "/v1/verify")
+	require.NoError(t, err)
+	r.Body.Close()
+	require.Equal(t, http.StatusForbidden, r.StatusCode)
+	r, err = http.Get(open.URL + "/v1/accounts/x")
+	require.NoError(t, err)
+	r.Body.Close()
+	require.Equal(t, http.StatusNotFound, r.StatusCode, "open API serves without auth")
+}
+
+func TestReverseEndpointAndKeyScoping(t *testing.T) {
+	srv, _ := newServer(t)
+	openBooks(t, srv)
+	require.Equal(t, http.StatusCreated, do(t, srv, "POST", "/v1/transfers", "k-1", sale("s-1", 4000)).status)
+
+	rev := do(t, srv, "POST", "/v1/transfers/s-1/reverse", "k-rev", map[string]string{"reference": "s-1-rev"})
+	require.Equal(t, http.StatusCreated, rev.status, string(rev.body))
+	require.Contains(t, string(rev.body), `"reverses":`)
+
+	bal := do(t, srv, "GET", "/v1/accounts/cash/balance", "", nil)
+	require.Contains(t, string(bal.body), `"amount":"0"`)
+
+	again := do(t, srv, "POST", "/v1/transfers/s-1/reverse", "k-rev-2", map[string]string{"reference": "s-1-rev-2"})
+	require.Equal(t, http.StatusConflict, again.status)
+	require.Contains(t, string(again.body), "already_reversed")
+
+	// Same key, same body, different route: must not replay the transfer's
+	// response as if it were a reversal.
+	body := map[string]string{"reference": "shared-body"}
+	first := do(t, srv, "POST", "/v1/transfers/s-1-rev/reverse", "k-shared", body)
+	require.Equal(t, http.StatusCreated, first.status, string(first.body))
+	other := do(t, srv, "POST", "/v1/holds", "k-shared", body)
+	require.NotEqual(t, http.StatusCreated, other.status, "a different route with the same key is its own request")
+	require.Empty(t, other.header.Get(idempotent.ReplayHeader))
 }
