@@ -307,3 +307,38 @@ func TestHealthAndReadiness(t *testing.T) {
 	require.Equal(t, http.StatusOK, do(t, srv, "GET", "/healthz", "", nil).status)
 	require.Equal(t, http.StatusServiceUnavailable, do(t, srv, "GET", "/readyz", "", nil).status)
 }
+
+func TestReconcileEndpoint(t *testing.T) {
+	srv, _ := newServer(t)
+	openBooks(t, srv)
+
+	at := time.Date(2026, 7, 1, 10, 0, 0, 0, time.UTC)
+	for _, ref := range []string{"p-1", "p-2"} {
+		body := sale(ref, 1500)
+		body["posted_at"] = at
+		require.Equal(t, http.StatusCreated, do(t, srv, "POST", "/v1/transfers", "k-"+ref, body).status)
+	}
+
+	req := map[string]any{
+		"from": at.Add(-time.Hour), "to": at.Add(time.Hour),
+		"entries": []map[string]any{
+			{"reference": "p-1", "amount": map[string]string{"amount": "1500", "currency": "TRY"}},
+			{"reference": "p-2", "amount": map[string]string{"amount": "1499", "currency": "TRY"}},
+			{"reference": "p-3", "amount": map[string]string{"amount": "800", "currency": "TRY"}},
+		},
+	}
+	r := do(t, srv, "POST", "/v1/accounts/cash/reconcile", "", req)
+	require.Equal(t, http.StatusOK, r.status, string(r.body))
+
+	var report ledger.ReconcileReport
+	require.NoError(t, json.Unmarshal(r.body, &report))
+	require.Len(t, report.Matched, 1)
+	require.Len(t, report.AmountMismatch, 1)
+	require.Len(t, report.MissingInLedger, 1)
+	require.Empty(t, report.MissingExternally)
+	require.Equal(t, int64(3000-3799), report.Difference)
+
+	bad := do(t, srv, "POST", "/v1/accounts/cash/reconcile", "", map[string]any{"entries": []any{}})
+	require.Equal(t, http.StatusBadRequest, bad.status)
+	require.Contains(t, string(bad.body), "invalid_window")
+}

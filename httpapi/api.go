@@ -50,6 +50,7 @@ func New(pool *pgxpool.Pool, keys idempotent.Store, log *slog.Logger) http.Handl
 	mux.HandleFunc("POST /v1/accounts/{id}/archive", s.archiveAccount)
 	mux.HandleFunc("GET /v1/accounts/{id}/balance", s.getBalance)
 	mux.HandleFunc("GET /v1/accounts/{id}/statement", s.getStatement)
+	mux.HandleFunc("POST /v1/accounts/{id}/reconcile", s.reconcile)
 	mux.HandleFunc("GET /v1/transfers/{reference}", s.getTransfer)
 	mux.HandleFunc("GET /v1/verify", s.verify)
 
@@ -237,6 +238,36 @@ func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, transferResponse{ID: id, Transfer: &t})
 }
 
+type reconcileRequest struct {
+	From    time.Time              `json:"from"`
+	To      time.Time              `json:"to"`
+	Entries []ledger.ExternalEntry `json:"entries"`
+}
+
+// reconcile is a POST because the external record travels in the body, but it
+// writes nothing: the report is the whole output.
+func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
+	var req reconcileRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	if req.From.IsZero() || req.To.IsZero() || req.To.Before(req.From) {
+		badRequest(w, "invalid_window", "from and to must be RFC 3339 timestamps with from <= to")
+		return
+	}
+	if len(req.Entries) > 50_000 {
+		badRequest(w, "too_many_entries", "reconcile at most 50000 entries per request")
+		return
+	}
+
+	report, err := s.lg.Reconcile(r.Context(), r.PathValue("id"), req.From, req.To, req.Entries)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, report)
+}
+
 func (s *Server) verify(w http.ResponseWriter, r *http.Request) {
 	report, err := s.lg.Verify(r.Context())
 	if err != nil {
@@ -271,7 +302,7 @@ func isInternal(err error) bool {
 }
 
 func decode(w http.ResponseWriter, r *http.Request, dst any) bool {
-	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 8<<20)) // reconcile files are the big ones
 	dec.DisallowUnknownFields()
 	if err := dec.Decode(dst); err != nil {
 		badRequest(w, "invalid_json", err.Error())
