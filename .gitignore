@@ -1,0 +1,5 @@
+/sumzero
+*.test
+coverage.out
+.env
+.DS_Store
