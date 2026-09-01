@@ -346,3 +346,79 @@ func TestReconcileEndpoint(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, bad.status)
 	require.Contains(t, string(bad.body), "invalid_window")
 }
+
+func TestHoldsOverHTTP(t *testing.T) {
+	srv, _ := newServer(t)
+	no := false
+	for _, a := range []map[string]any{
+		{"id": "wallet", "type": "asset", "currency": "TRY", "allow_negative": no},
+		{"id": "merchant", "type": "liability", "currency": "TRY"},
+		{"id": "topup", "type": "liability", "currency": "TRY"},
+	} {
+		require.Equal(t, http.StatusCreated, do(t, srv, "POST", "/v1/accounts", "", a).status)
+	}
+	amt := func(m int64) map[string]string { return map[string]string{"amount": fmt.Sprint(m), "currency": "TRY"} }
+	fund := map[string]any{"reference": "fund", "postings": []map[string]any{
+		{"account": "wallet", "amount": amt(10000), "direction": "debit"},
+		{"account": "topup", "amount": amt(10000), "direction": "credit"}}}
+	require.Equal(t, http.StatusCreated, do(t, srv, "POST", "/v1/transfers", "k-fund", fund).status)
+
+	spend := func(ref string, m int64) map[string]any {
+		return map[string]any{"reference": ref, "postings": []map[string]any{
+			{"account": "wallet", "amount": amt(m), "direction": "credit"},
+			{"account": "merchant", "amount": amt(m), "direction": "debit"}}}
+	}
+
+	t.Run("hold needs a key", func(t *testing.T) {
+		r := do(t, srv, "POST", "/v1/holds", "", map[string]any{"account": "wallet", "reference": "h0", "amount": amt(1)})
+		require.Equal(t, http.StatusBadRequest, r.status)
+	})
+
+	t.Run("hold, available, capture", func(t *testing.T) {
+		r := do(t, srv, "POST", "/v1/holds", "k-h1", map[string]any{"account": "wallet", "reference": "h1", "amount": amt(6000)})
+		require.Equal(t, http.StatusCreated, r.status, string(r.body))
+		require.Contains(t, string(r.body), `"status":"active"`)
+
+		avail := do(t, srv, "GET", "/v1/accounts/wallet/available", "", nil)
+		require.Contains(t, string(avail.body), `"amount":"4000"`)
+
+		over := do(t, srv, "POST", "/v1/transfers", "k-over", spend("over", 4001))
+		require.Equal(t, http.StatusUnprocessableEntity, over.status)
+		require.Contains(t, string(over.body), "insufficient_funds")
+
+		cap := do(t, srv, "POST", "/v1/holds/h1/capture", "k-cap", spend("cap", 5500))
+		require.Equal(t, http.StatusCreated, cap.status, string(cap.body))
+
+		h := do(t, srv, "GET", "/v1/holds/h1", "", nil)
+		require.Contains(t, string(h.body), `"status":"captured"`)
+		avail = do(t, srv, "GET", "/v1/accounts/wallet/available", "", nil)
+		require.Contains(t, string(avail.body), `"amount":"4500"`, "partial capture released the rest")
+	})
+
+	t.Run("release and error mapping", func(t *testing.T) {
+		require.Equal(t, http.StatusCreated,
+			do(t, srv, "POST", "/v1/holds", "k-h2", map[string]any{"account": "wallet", "reference": "h2", "amount": amt(100)}).status)
+		require.Equal(t, http.StatusNoContent, do(t, srv, "POST", "/v1/holds/h2/release", "k-rel", nil).status)
+
+		again := do(t, srv, "POST", "/v1/holds/h2/release", "k-rel2", nil)
+		require.Equal(t, http.StatusConflict, again.status)
+		require.Contains(t, string(again.body), "hold_not_active")
+
+		missing := do(t, srv, "GET", "/v1/holds/nope", "", nil)
+		require.Equal(t, http.StatusNotFound, missing.status)
+
+		too := do(t, srv, "POST", "/v1/holds", "k-h3", map[string]any{"account": "wallet", "reference": "h3", "amount": amt(999999)})
+		require.Equal(t, http.StatusUnprocessableEntity, too.status)
+		require.Contains(t, string(too.body), "insufficient_funds")
+	})
+
+	t.Run("capture replays under the same key", func(t *testing.T) {
+		require.Equal(t, http.StatusCreated,
+			do(t, srv, "POST", "/v1/holds", "k-h4", map[string]any{"account": "wallet", "reference": "h4", "amount": amt(1000)}).status)
+		first := do(t, srv, "POST", "/v1/holds/h4/capture", "k-cap4", spend("cap4", 1000))
+		require.Equal(t, http.StatusCreated, first.status)
+		second := do(t, srv, "POST", "/v1/holds/h4/capture", "k-cap4", spend("cap4", 1000))
+		require.Equal(t, http.StatusCreated, second.status)
+		require.Equal(t, "true", second.header.Get(idempotent.ReplayHeader))
+	})
+}
