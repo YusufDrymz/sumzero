@@ -116,6 +116,10 @@ func (l *Ledger) Post(ctx context.Context, t *Transfer) (int64, error) {
 	}
 	postedAt = postedAt.UTC().Truncate(time.Microsecond)
 
+	// Hand the resolved instant back to the caller: it is what went into the
+	// row and the hash, and a response that reports a zero time is a lie.
+	t.PostedAt = postedAt
+
 	var id int64
 	err := l.inTx(ctx, func(q db) error {
 		accounts, err := l.lockAccounts(ctx, q, t)

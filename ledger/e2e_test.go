@@ -110,6 +110,29 @@ func TestPostAndBalance(t *testing.T) {
 	require.Equal(t, int64(0), tb["TRY"], "books must balance")
 }
 
+// Post must report the instant it actually stored, so a caller (and the API
+// response built from it) can show when the money moved.
+func TestPostReportsResolvedTimestamp(t *testing.T) {
+	ctx := context.Background()
+	pool := startPostgres(t)
+	lg := ledger.New(pool)
+	openBooks(t, lg)
+
+	before := time.Now().UTC().Truncate(time.Microsecond)
+	tx := (&ledger.Transfer{Reference: "stamped"}).
+		Debit("cash", try(100)).Credit("revenue", try(100))
+	require.True(t, tx.PostedAt.IsZero())
+
+	id, err := lg.Post(ctx, tx)
+	require.NoError(t, err)
+	require.False(t, tx.PostedAt.IsZero(), "Post must fill in the timestamp it used")
+	require.False(t, tx.PostedAt.Before(before))
+
+	var stored time.Time
+	require.NoError(t, pool.QueryRow(ctx, `SELECT posted_at FROM transfers WHERE id = $1`, id).Scan(&stored))
+	require.True(t, stored.Equal(tx.PostedAt), "reported %s, stored %s", tx.PostedAt, stored)
+}
+
 func TestPostRejections(t *testing.T) {
 	ctx := context.Background()
 	lg := ledger.New(startPostgres(t))
