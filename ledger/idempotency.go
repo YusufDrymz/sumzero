@@ -33,12 +33,20 @@ func NewIdempotencyStore(pool *pgxpool.Pool, ttl time.Duration) *IdempotencyStor
 
 // Begin reserves a key. The insert itself is the lock: whoever wins the primary
 // key owns the request, and everyone else is told what happened to it.
+//
+// Re-reserving an expired key also clears the old response. Otherwise a handler
+// that fails on the retry would Release nothing (the row looks completed) and
+// the next attempt would replay a stale answer.
 func (s *IdempotencyStore) Begin(ctx context.Context, key string) (idempotent.BeginResult, *idempotent.Entry, error) {
 	tag, err := s.pool.Exec(ctx, `
-		INSERT INTO idempotency_keys (key, expires_at) VALUES ($1, now() + $2::interval)
-		ON CONFLICT (key) DO UPDATE SET expires_at = excluded.expires_at
+		INSERT INTO idempotency_keys (key, expires_at)
+		VALUES ($1, now() + make_interval(secs => $2))
+		ON CONFLICT (key) DO UPDATE
+		SET expires_at = excluded.expires_at,
+		    fingerprint = NULL, status_code = NULL, headers = NULL, body = NULL,
+		    created_at = now()
 		WHERE idempotency_keys.expires_at <= now()`,
-		key, s.ttl.String())
+		key, s.ttl.Seconds())
 	if err != nil {
 		return 0, nil, err
 	}

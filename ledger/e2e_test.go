@@ -55,12 +55,17 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 	require.NoError(t, err)
 	t.Cleanup(pool.Close)
 
-	schema, err := os.ReadFile(filepath.Join("..", "migrations", "0001_init.sql"))
-	require.NoError(t, err)
-	_, err = pool.Exec(ctx, string(schema))
+	_, err = pool.Exec(ctx, mustRead(t, "0001_init.sql"))
 	require.NoError(t, err)
 
 	return pool
+}
+
+func mustRead(t *testing.T, migration string) string {
+	t.Helper()
+	b, err := os.ReadFile(filepath.Join("..", "migrations", migration))
+	require.NoError(t, err)
+	return string(b)
 }
 
 // openBooks sets up a small chart of accounts used by most tests.
