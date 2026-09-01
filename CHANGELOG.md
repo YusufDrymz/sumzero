@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.3.0 — 2026-09-02
 
 ### Added
 - `Reverse` and `POST /v1/transfers/{reference}/reverse`: the mirror transfer,
