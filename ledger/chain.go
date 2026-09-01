@@ -3,6 +3,7 @@ package ledger
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"hash"
 	"time"
 )
 
@@ -48,9 +49,7 @@ func chainDigest(prev []byte, t *Transfer, postedAt time.Time) []byte {
 	return h.Sum(nil)
 }
 
-type byteWriter interface{ Write([]byte) (int, error) }
-
-func writeField(h byteWriter, b []byte) {
+func writeField(h hash.Hash, b []byte) {
 	var n [4]byte
 	binary.BigEndian.PutUint32(n[:], uint32(len(b)))
 	h.Write(n[:])
