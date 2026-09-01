@@ -21,7 +21,7 @@ type Report struct {
 	Accounts  int       `json:"accounts"`
 	Transfers int       `json:"transfers"`
 	Postings  int       `json:"postings"`
-	Problems  []Problem `json:"problems"`
+	Problems  []Problem `json:"problems"` // never nil in JSON: see Verify
 	Took      string    `json:"took"`
 }
 
@@ -36,7 +36,9 @@ func (r Report) OK() bool { return len(r.Problems) == 0 }
 // right.
 func (l *Ledger) Verify(ctx context.Context) (Report, error) {
 	start := time.Now()
-	var r Report
+	// An empty slice rather than nil, so the JSON says [] and a consumer can
+	// count it without a null check.
+	r := Report{Problems: []Problem{}}
 
 	if err := l.db.QueryRow(ctx, `
 		SELECT (SELECT count(*) FROM accounts),
