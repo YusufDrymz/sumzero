@@ -94,9 +94,12 @@ func serve(args []string) error {
 	}
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	keys := ledger.NewIdempotencyStore(pool, *ttl)
+	go sweepKeys(ctx, keys, log)
+
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           httpapi.New(pool, ledger.NewIdempotencyStore(pool, *ttl), log),
+		Handler:           httpapi.New(pool, keys, log),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
@@ -121,6 +124,26 @@ func serve(args []string) error {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 	return srv.Shutdown(shutdownCtx)
+}
+
+// sweepKeys drops expired idempotency keys once an hour. Missing a sweep is
+// harmless; the table just holds a few more rows until the next one.
+func sweepKeys(ctx context.Context, keys *ledger.IdempotencyStore, log *slog.Logger) {
+	tick := time.NewTicker(time.Hour)
+	defer tick.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-tick.C:
+			n, err := keys.Sweep(ctx)
+			if err != nil {
+				log.Warn("idempotency sweep failed", "err", err)
+			} else if n > 0 {
+				log.Info("idempotency keys swept", "deleted", n)
+			}
+		}
+	}
 }
 
 func envOr(key, fallback string) string {
