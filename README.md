@@ -9,9 +9,9 @@ REST API. Same engine either way.
 [![CI](https://github.com/YusufDrymz/sumzero/actions/workflows/ci.yml/badge.svg)](https://github.com/YusufDrymz/sumzero/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Status: early.** The domain model, schema and invariant tests are in place.
-> The Postgres store, REST API and CLI are being built. Not ready for anyone's
-> money yet — see [Roadmap](#roadmap).
+> **Status: early.** The engine works against Postgres and is tested there. The
+> REST API and the `verify` command are not written yet. Not ready for anyone's
+> money — see [Roadmap](#roadmap).
 
 ## Why
 
@@ -48,21 +48,49 @@ go get github.com/YusufDrymz/sumzero
 
 ## Usage
 
+Apply [`migrations/0001_init.sql`](migrations/0001_init.sql) with whatever tool
+you already use, then:
+
 ```go
-lg := ledger.New(pool) // *pgxpool.Pool — your database, your migrations
+lg := ledger.New(pool) // *pgxpool.Pool — your database
 
 lg.CreateAccount(ctx, ledger.Account{ID: "cash", Type: ledger.Asset, Currency: "TRY"})
+lg.CreateAccount(ctx, ledger.Account{ID: "fees", Type: ledger.Expense, Currency: "TRY"})
 lg.CreateAccount(ctx, ledger.Account{ID: "revenue", Type: ledger.Income, Currency: "TRY"})
 
 // A 100.00 TRY sale, 10.00 of it commission.
-err := lg.Post(ctx, (&ledger.Transfer{Reference: "order-1071", Description: "sale"}).
+_, err := lg.Post(ctx, (&ledger.Transfer{Reference: "order-1071", Description: "sale"}).
     Debit("cash", ledger.Amount(9000, "TRY")).
     Debit("fees", ledger.Amount(1000, "TRY")).
     Credit("revenue", ledger.Amount(10000, "TRY")))
+
+bal, _ := lg.Balance(ctx, "cash")                        // 9000 TRY
+was, _ := lg.BalanceAsOf(ctx, "cash", lastTuesday)       // recomputed from history
+lines, _ := lg.Statement(ctx, "cash", ledger.StatementOptions{Limit: 50})
 ```
 
 `Reference` is your own id for the movement. It is unique, so a retried request
 cannot post the same transfer twice.
+
+### Inside your own transaction
+
+This is the part a separate ledger service cannot do. `NewTx` joins the
+transaction you are already in, so the entry and the thing it describes commit
+together or not at all — no "payment saved, ledger missed it" window:
+
+```go
+tx, _ := pool.Begin(ctx)
+defer tx.Rollback(ctx)
+
+order.MarkPaid(ctx, tx, orderID)
+_, err := ledger.NewTx(tx).Post(ctx, (&ledger.Transfer{Reference: orderID}).
+    Debit("cash", ledger.Amount(9000, "TRY")).
+    Credit("revenue", ledger.Amount(9000, "TRY")))
+if err != nil {
+    return err // nothing was written
+}
+return tx.Commit(ctx)
+```
 
 Account types and the side they carry a positive balance on:
 
@@ -85,9 +113,18 @@ recomputes every balance from them and re-walks the hash chain.
 | Phase | Contents | State |
 |-------|----------|-------|
 | 1 | Domain model, sum-zero invariant, schema, hash chain | done |
-| 2 | Postgres store: post, balance, statement, as-of queries | in progress |
-| 3 | REST API with mandatory idempotency keys | |
-| 4 | `verify` command, reconciliation against external records | |
+| 2 | Postgres store: post, balance, as-of, statement, embedded mode | done |
+| 3 | `verify`: recompute balances, re-walk the chain | next |
+| 4 | REST API with mandatory idempotency keys | |
+| 5 | Reconciliation against external records | |
+
+## Throughput
+
+Writes are serialised: the hash chain is one sequence, so `Post` takes a lock
+while it links a transfer. That puts the ceiling at roughly one Postgres
+round-trip per transfer, which suits a service recording its own payments and
+does not suit exchange-grade volume. [ADR-0003](docs/adr/0003-chain-serialises-writes.md)
+has the reasoning and the way out if it ever binds.
 
 ## Design notes
 
@@ -96,8 +133,11 @@ Decisions and their reasoning live in [`docs/adr/`](docs/adr).
 ## Development
 
 ```bash
-go test -race -cover ./...
+go test -short ./...              # unit tests only
+go test -race -cover ./...        # adds e2e against a throwaway Postgres (needs Docker)
 ```
+
+`SUMZERO_TEST_PG_IMAGE` picks the image; CI runs the suite against 16 and 17.
 
 <details>
 <summary>🇹🇷 Türkçe</summary>
@@ -118,6 +158,15 @@ aksi halde atomik reddedilir; `UPDATE`/`DELETE` yok — trigger seviyesinde
 yasak, düzeltme ters kayıtla yapılır (as-of bakiye ancak böyle anlamlı olur);
 her transfer bir öncekinin hash'ini taşır, silinen/değiştirilen satır sessiz
 kalmaz; şema public ve dokümante, `psql` ile sorgulanır, lock-in yok.
+
+**Gömülü mod** ayrı bir defter servisinin yapamadığı şey: `ledger.NewTx(tx)` ile
+çağıranın açık transaction'ına katılır, yani kayıt ile onu doğuran iş birlikte
+commit olur ya da birlikte geri alınır. "Ödeme kaydedildi ama ledger kaçırdı"
+aralığı mimari olarak yok.
+
+**Yazma serileşir:** hash zinciri tek sıra olduğu için `Post` link atarken kilit
+alır. Tavan, transfer başına bir Postgres round-trip'i civarı — kendi
+ödemelerini kaydeden bir servise uygun, borsa hacmine değil (ADR-0003).
 
 **Kapsam dışı:** Bu bir muhasebe sistemi değil, posting motoru. Vergi kuralları,
 resmi raporlar, hesap planı şablonları, döviz kuru kaynağı yok. Ne hareket
