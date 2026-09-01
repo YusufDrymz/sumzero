@@ -57,8 +57,8 @@ func (l *Ledger) CreateAccount(ctx context.Context, a Account) error {
 
 	return l.inTx(ctx, func(q db) error {
 		tag, err := q.Exec(ctx, `
-			INSERT INTO accounts (id, type, currency) VALUES ($1, $2, $3)
-			ON CONFLICT (id) DO NOTHING`, a.ID, string(a.Type), a.Currency)
+			INSERT INTO accounts (id, type, currency, allow_negative) VALUES ($1, $2, $3, $4)
+			ON CONFLICT (id) DO NOTHING`, a.ID, string(a.Type), a.Currency, a.AllowNegative)
 		if err != nil {
 			return err
 		}
@@ -74,8 +74,8 @@ func (l *Ledger) CreateAccount(ctx context.Context, a Account) error {
 func (l *Ledger) Account(ctx context.Context, id string) (Account, error) {
 	var a Account
 	err := l.db.QueryRow(ctx,
-		`SELECT id, type, currency, archived FROM accounts WHERE id = $1`, id).
-		Scan(&a.ID, &a.Type, &a.Currency, &a.Archived)
+		`SELECT id, type, currency, archived, allow_negative FROM accounts WHERE id = $1`, id).
+		Scan(&a.ID, &a.Type, &a.Currency, &a.Archived, &a.AllowNegative)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Account{}, fmt.Errorf("%w: %s", ErrUnknownAccount, id)
 	}
@@ -103,7 +103,21 @@ func (l *Ledger) Post(ctx context.Context, t *Transfer) (int64, error) {
 	if err := t.Validate(); err != nil {
 		return 0, err
 	}
+	var id int64
+	err := l.inTx(ctx, func(q db) (err error) {
+		id, err = l.post(ctx, q, t, 0)
+		return err
+	})
+	if err != nil {
+		return 0, err
+	}
+	return id, nil
+}
 
+// post is Post inside an open transaction, for a transfer that has already
+// passed Validate. excludeHold is the hold this transfer captures, if any: it
+// must not count against the account it is releasing.
+func (l *Ledger) post(ctx context.Context, q db, t *Transfer, excludeHold int64) (int64, error) {
 	// Store the same instant the chain hashes: Postgres keeps microseconds, so
 	// anything finer would be lost on write and break verification later.
 	postedAt := t.PostedAt
@@ -116,66 +130,80 @@ func (l *Ledger) Post(ctx context.Context, t *Transfer) (int64, error) {
 	// row and the hash, and a response that reports a zero time is a lie.
 	t.PostedAt = postedAt
 
-	var id int64
-	err := l.inTx(ctx, func(q db) error {
-		accounts, err := l.lockAccounts(ctx, q, t)
-		if err != nil {
-			return err
-		}
-		for i, p := range t.Postings {
-			acc, ok := accounts[p.Account]
-			if !ok {
-				return fmt.Errorf("%w: %s", ErrUnknownAccount, p.Account)
-			}
-			if acc.Archived {
-				return fmt.Errorf("%w: %s", ErrAccountArchived, p.Account)
-			}
-			if acc.Currency != p.Amount.Currency {
-				return fmt.Errorf("%w: posting %d: account %s is %s, posting is %s",
-					ErrCurrencyMismatch, i, p.Account, acc.Currency, p.Amount.Currency)
-			}
-		}
-
-		// The chain is a single global sequence, so links must be taken one at
-		// a time. This serialises writes on purpose: a chain with a race in it
-		// proves nothing. See docs/adr/0003. The lock lives until the
-		// transaction ends — in embedded mode that is the caller's commit, so a
-		// caller that posts early and commits late stalls every other writer.
-		if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, chainLockKey); err != nil {
-			return err
-		}
-
-		var prev []byte
-		err = q.QueryRow(ctx, `SELECT hash FROM transfers ORDER BY id DESC LIMIT 1`).Scan(&prev)
-		if err != nil && !errors.Is(err, pgx.ErrNoRows) {
-			return err
-		}
-
-		err = q.QueryRow(ctx, `
-			INSERT INTO transfers (reference, description, posted_at, prev_hash, hash)
-			VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-			t.Reference, t.Description, postedAt, prev, chainDigest(prev, t, postedAt)).Scan(&id)
-		if err != nil {
-			if isUniqueViolation(err) {
-				return fmt.Errorf("%w: %s", ErrDuplicateReference, t.Reference)
-			}
-			return err
-		}
-
-		for _, p := range t.Postings {
-			_, err = q.Exec(ctx, `
-				INSERT INTO postings (transfer_id, account_id, amount, currency, direction)
-				VALUES ($1, $2, $3, $4, $5)`,
-				id, p.Account, p.Amount.Amount, p.Amount.Currency, string(p.Dir))
-			if err != nil {
-				return err
-			}
-		}
-
-		return l.applyBalances(ctx, q, t)
-	})
+	accounts, err := l.lockAccounts(ctx, q, t)
 	if err != nil {
 		return 0, err
+	}
+	for i, p := range t.Postings {
+		acc, ok := accounts[p.Account]
+		if !ok {
+			return 0, fmt.Errorf("%w: %s", ErrUnknownAccount, p.Account)
+		}
+		if acc.Archived {
+			return 0, fmt.Errorf("%w: %s", ErrAccountArchived, p.Account)
+		}
+		if acc.Currency != p.Amount.Currency {
+			return 0, fmt.Errorf("%w: posting %d: account %s is %s, posting is %s",
+				ErrCurrencyMismatch, i, p.Account, acc.Currency, p.Amount.Currency)
+		}
+	}
+
+	// The chain is a single global sequence, so links must be taken one at
+	// a time. This serialises writes on purpose: a chain with a race in it
+	// proves nothing. See docs/adr/0003. The lock lives until the
+	// transaction ends — in embedded mode that is the caller's commit, so a
+	// caller that posts early and commits late stalls every other writer.
+	if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, chainLockKey); err != nil {
+		return 0, err
+	}
+
+	var prev []byte
+	err = q.QueryRow(ctx, `SELECT hash FROM transfers ORDER BY id DESC LIMIT 1`).Scan(&prev)
+	if err != nil && !errors.Is(err, pgx.ErrNoRows) {
+		return 0, err
+	}
+
+	var id int64
+	err = q.QueryRow(ctx, `
+		INSERT INTO transfers (reference, description, posted_at, prev_hash, hash)
+		VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+		t.Reference, t.Description, postedAt, prev, chainDigest(prev, t, postedAt)).Scan(&id)
+	if err != nil {
+		if isUniqueViolation(err) {
+			return 0, fmt.Errorf("%w: %s", ErrDuplicateReference, t.Reference)
+		}
+		return 0, err
+	}
+
+	for _, p := range t.Postings {
+		_, err = q.Exec(ctx, `
+			INSERT INTO postings (transfer_id, account_id, amount, currency, direction)
+			VALUES ($1, $2, $3, $4, $5)`,
+			id, p.Account, p.Amount.Amount, p.Amount.Currency, string(p.Dir))
+		if err != nil {
+			return 0, err
+		}
+	}
+
+	if err := l.applyBalances(ctx, q, t); err != nil {
+		return 0, err
+	}
+
+	// The overdraft guard runs after the balances moved, on the same locked
+	// rows: an account that may not go negative must still cover its active
+	// holds. Failing here rolls the whole transfer back.
+	for _, acc := range accounts {
+		if acc.AllowNegative {
+			continue
+		}
+		avail, err := availableLocked(ctx, q, acc, excludeHold)
+		if err != nil {
+			return 0, err
+		}
+		if avail < 0 {
+			return 0, fmt.Errorf("%w: %s would be %d after %s",
+				ErrInsufficientFunds, acc.ID, avail, t.Reference)
+		}
 	}
 	return id, nil
 }
@@ -194,7 +222,7 @@ func (l *Ledger) lockAccounts(ctx context.Context, q db, t *Transfer) (map[strin
 	}
 
 	rows, err := q.Query(ctx, `
-		SELECT id, type, currency, archived FROM accounts
+		SELECT id, type, currency, archived, allow_negative FROM accounts
 		WHERE id = ANY($1) ORDER BY id FOR UPDATE`, ids)
 	if err != nil {
 		return nil, err
@@ -204,7 +232,7 @@ func (l *Ledger) lockAccounts(ctx context.Context, q db, t *Transfer) (map[strin
 	out := make(map[string]Account, len(ids))
 	for rows.Next() {
 		var a Account
-		if err := rows.Scan(&a.ID, &a.Type, &a.Currency, &a.Archived); err != nil {
+		if err := rows.Scan(&a.ID, &a.Type, &a.Currency, &a.Archived, &a.AllowNegative); err != nil {
 			return nil, err
 		}
 		out[a.ID] = a

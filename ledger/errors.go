@@ -17,4 +17,8 @@ var (
 	ErrMissingReference   = errors.New("sumzero: transfer reference is required")
 	ErrDuplicateReference = errors.New("sumzero: transfer reference already posted")
 	ErrUnknownTransfer    = errors.New("sumzero: unknown transfer")
+	ErrInsufficientFunds  = errors.New("sumzero: insufficient available balance")
+	ErrUnknownHold        = errors.New("sumzero: unknown hold")
+	ErrHoldNotActive      = errors.New("sumzero: hold is not active")
+	ErrCaptureMismatch    = errors.New("sumzero: transfer does not capture the hold")
 )

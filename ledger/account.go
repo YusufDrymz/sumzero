@@ -32,6 +32,12 @@ type Account struct {
 	Type     AccountType `json:"type"`
 	Currency string      `json:"currency"`
 	Archived bool        `json:"archived"`
+
+	// AllowNegative is the overdraft switch. True (the default) means the
+	// ledger records whatever it is told, like a journal. False turns on the
+	// guard: a transfer or hold that would push the available balance below
+	// zero is refused.
+	AllowNegative bool `json:"allow_negative"`
 }
 
 // Direction is the side a posting hits.
