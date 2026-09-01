@@ -49,16 +49,24 @@ func New(pool *pgxpool.Pool, keys idempotent.Store, log *slog.Logger) http.Handl
 	mux.HandleFunc("GET /v1/accounts/{id}", s.getAccount)
 	mux.HandleFunc("POST /v1/accounts/{id}/archive", s.archiveAccount)
 	mux.HandleFunc("GET /v1/accounts/{id}/balance", s.getBalance)
+	mux.HandleFunc("GET /v1/accounts/{id}/available", s.getAvailable)
+	mux.HandleFunc("GET /v1/holds/{reference}", s.getHold)
 	mux.HandleFunc("GET /v1/accounts/{id}/statement", s.getStatement)
 	mux.HandleFunc("POST /v1/accounts/{id}/reconcile", s.reconcile)
 	mux.HandleFunc("GET /v1/transfers/{reference}", s.getTransfer)
 	mux.HandleFunc("GET /v1/verify", s.verify)
 
-	// The write path: the key is mandatory here, and the middleware replays a
+	// The write paths: the key is mandatory here, and the middleware replays a
 	// stored response when the same key comes back.
-	post := http.HandlerFunc(s.postTransfer)
-	mux.Handle("POST /v1/transfers",
-		requireIdempotencyKey(idempotent.New(keys)(post)))
+	keyed := idempotent.New(keys)
+	for pattern, h := range map[string]http.HandlerFunc{
+		"POST /v1/transfers":                 s.postTransfer,
+		"POST /v1/holds":                     s.postHold,
+		"POST /v1/holds/{reference}/capture": s.captureHold,
+		"POST /v1/holds/{reference}/release": s.releaseHold,
+	} {
+		mux.Handle(pattern, requireIdempotencyKey(keyed(h)))
+	}
 
 	return mux
 }
@@ -72,7 +80,7 @@ func requireIdempotencyKey(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Header.Get(IdempotencyHeader) == "" {
 			badRequest(w, "missing_idempotency_key",
-				"POST /v1/transfers requires an "+IdempotencyHeader+" header")
+				"writes require an "+IdempotencyHeader+" header")
 			return
 		}
 		next.ServeHTTP(w, r)
@@ -92,6 +100,10 @@ type accountRequest struct {
 	ID       string             `json:"id"`
 	Type     ledger.AccountType `json:"type"`
 	Currency string             `json:"currency"`
+
+	// AllowNegative defaults to true on the wire as in the engine: a client
+	// that wants the guard says so.
+	AllowNegative *bool `json:"allow_negative"`
 }
 
 func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
@@ -100,7 +112,10 @@ func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	a := ledger.Account{ID: req.ID, Type: req.Type, Currency: req.Currency}
+	a := ledger.Account{ID: req.ID, Type: req.Type, Currency: req.Currency, AllowNegative: true}
+	if req.AllowNegative != nil {
+		a.AllowNegative = *req.AllowNegative
+	}
 	if err := s.lg.CreateAccount(r.Context(), a); err != nil {
 		s.fail(w, r, err)
 		return
@@ -157,6 +172,73 @@ func (s *server) getBalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, balanceResponse{Account: id, Balance: bal})
 }
 
+func (s *server) getAvailable(w http.ResponseWriter, r *http.Request) {
+	id := r.PathValue("id")
+	avail, err := s.lg.Available(r.Context(), id)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, balanceResponse{Account: id, Balance: avail})
+}
+
+type holdRequest struct {
+	Account   string       `json:"account"`
+	Reference string       `json:"reference"`
+	Amount    ledger.Money `json:"amount"`
+	ExpiresAt *time.Time   `json:"expires_at"`
+}
+
+func (s *server) postHold(w http.ResponseWriter, r *http.Request) {
+	var req holdRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	hr := ledger.HoldRequest{Account: req.Account, Reference: req.Reference, Amount: req.Amount}
+	if req.ExpiresAt != nil {
+		hr.ExpiresAt = *req.ExpiresAt
+	}
+	h, err := s.lg.Hold(r.Context(), hr)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, h)
+}
+
+func (s *server) getHold(w http.ResponseWriter, r *http.Request) {
+	h, err := s.lg.HoldByReference(r.Context(), r.PathValue("reference"))
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, h)
+}
+
+// captureHold takes the same body as POST /v1/transfers: the transfer that
+// moves the money. The hold reference comes from the path.
+func (s *server) captureHold(w http.ResponseWriter, r *http.Request) {
+	var req transferRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	t := req.transfer()
+	id, err := s.lg.Capture(r.Context(), r.PathValue("reference"), t)
+	if err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, transferResponse{ID: id, Transfer: t})
+}
+
+func (s *server) releaseHold(w http.ResponseWriter, r *http.Request) {
+	if err := s.lg.Release(r.Context(), r.PathValue("reference")); err != nil {
+		s.fail(w, r, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *server) getStatement(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var opt ledger.StatementOptions
@@ -203,12 +285,7 @@ type transferResponse struct {
 	Transfer *ledger.Transfer `json:"transfer"`
 }
 
-func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
-	var req transferRequest
-	if !decode(w, r, &req) {
-		return
-	}
-
+func (req transferRequest) transfer() *ledger.Transfer {
 	t := &ledger.Transfer{
 		Reference:   req.Reference,
 		Description: req.Description,
@@ -217,6 +294,15 @@ func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 	if req.PostedAt != nil {
 		t.PostedAt = *req.PostedAt
 	}
+	return t
+}
+
+func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
+	var req transferRequest
+	if !decode(w, r, &req) {
+		return
+	}
+	t := req.transfer()
 
 	id, err := s.lg.Post(r.Context(), t)
 	if err != nil {
