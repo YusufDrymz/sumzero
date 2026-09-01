@@ -1,5 +1,21 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- Holds: `Hold`, `Capture`, `Release`, `ExpireHolds`, `Available`; the
+  `/v1/holds` endpoints and `GET /v1/accounts/{id}/available`.
+- `allow_negative` on accounts (default `true`). When `false`, a transfer or
+  hold that would push the available balance below zero is refused.
+- `serve` expires past-due holds every minute.
+
+### Changed
+- Every write endpoint now requires an `Idempotency-Key`, not only transfers.
+- Migration `0003_holds.sql` adds the `holds` table and the account column.
+
+### Decided
+- Accounts stay single-currency (ADR-0007).
+
 ## 0.1.0 — 2026-09-01
 
 First release. Everything below is new.
@@ -29,4 +45,4 @@ First release. Everything below is new.
 ### Known limits
 - Writes are serialised by the chain lock (ADR-0003).
 - Reconciliation matches on reference only (ADR-0005).
-- One currency per account; no FX, no holds.
+- One currency per account, by design.

@@ -117,9 +117,14 @@ sumzero serve --dsn postgres://... --addr :8080
 | `GET /v1/accounts/{id}` | one account |
 | `POST /v1/accounts/{id}/archive` | close it to new postings |
 | `GET /v1/accounts/{id}/balance` | current balance, or `?as_of=<RFC3339>` |
+| `GET /v1/accounts/{id}/available` | balance minus active holds |
 | `GET /v1/accounts/{id}/statement` | postings, `?from=&to=&limit=` |
 | `POST /v1/accounts/{id}/reconcile` | compare the account with an external record |
 | `POST /v1/transfers` | post a transfer — **`Idempotency-Key` required** |
+| `POST /v1/holds` | reserve an amount — key required |
+| `GET /v1/holds/{reference}` | one hold |
+| `POST /v1/holds/{reference}/capture` | move the money, close the hold — key required |
+| `POST /v1/holds/{reference}/release` | cancel the hold — key required |
 | `GET /v1/transfers/{reference}` | one transfer with its postings |
 | `GET /v1/verify` | verification report; 409 when the books do not check out |
 | `GET /healthz` `GET /readyz` | liveness and readiness, deliberately separate |
@@ -133,8 +138,8 @@ curl -X POST localhost:8080/v1/transfers   -H 'Idempotency-Key: 4f3c…'   -d '{
 Amounts are strings on the wire, in both directions, and a JSON number is
 rejected rather than rounded.
 
-The key is not optional: a transfer that cannot be retried safely is a transfer
-whose client has no answer after a timeout. Repeating a request replays the
+The key is not optional on any write: a transfer that cannot be retried safely
+is a transfer whose client has no answer after a timeout. Repeating a request replays the
 original response (`Idempotent-Replay: true`); reusing a key with a different
 body is a 422. Keys live in Postgres, via
 [go-idempotent](https://github.com/YusufDrymz/go-idempotent) — see
@@ -148,6 +153,42 @@ Errors always have the same shape:
 
 400 means the request was malformed, 422 means the books refuse it, 409 means it
 collided with something already recorded.
+
+## Holds and the overdraft guard
+
+By default the ledger records and never refuses: a journal does not argue with
+its bookkeeper. An account that models a real, spendable balance is different.
+Open it with `allow_negative: false` and it gets a guard — a transfer that
+would push it below zero is refused and rolled back.
+
+Holds are how a guarded account handles "we intend to take this, but not yet":
+the card was authorised, the payout is queued, the withdrawal is under review.
+
+```go
+lg.CreateAccount(ctx, ledger.Account{ID: "wallet", Type: ledger.Asset, Currency: "TRY", AllowNegative: false})
+
+h, _ := lg.Hold(ctx, ledger.HoldRequest{Account: "wallet", Reference: "auth-9", Amount: ledger.Amount(6000, "TRY"),
+    ExpiresAt: time.Now().Add(7 * 24 * time.Hour)})
+
+avail, _ := lg.Available(ctx, "wallet") // balance − active holds
+
+// Later: take 5500 of the 6000. The rest is released in the same transaction.
+lg.Capture(ctx, "auth-9", (&ledger.Transfer{Reference: "order-9"}).
+    Credit("wallet", ledger.Amount(5500, "TRY")).
+    Debit("merchant", ledger.Amount(5500, "TRY")))
+
+// Or never take it.
+lg.Release(ctx, "auth-9")
+```
+
+A hold moves nothing and is not part of history: `verify` does not audit it.
+It reserves until captured, released, or expired — and expiry is applied by a
+sweep (`serve` runs one every minute; embedded callers schedule `ExpireHolds`
+themselves). [ADR-0006](docs/adr/0006-holds-and-the-overdraft-guard.md).
+
+An account holds one currency. A customer with TRY and USD has two accounts;
+an FX movement is a four-leg transfer between them.
+[ADR-0007](docs/adr/0007-one-currency-per-account.md) says why that will stay.
 
 ## Reconcile
 
@@ -220,7 +261,8 @@ recomputes every balance from them and re-walks the hash chain.
 | 4 | REST API with mandatory idempotency keys | done |
 | 5 | Reconciliation against external records | done |
 | 6 | v0.1.0 | done |
-| 7 | Holds, multi-currency accounts, per-book chains | later |
+| 7 | Holds, overdraft guard | done |
+| 8 | Per-book chains (only if the write ceiling ever binds) | later |
 
 ## Throughput
 
@@ -277,6 +319,13 @@ destekli bakiye, `/healthz` ve `/readyz` ayrı. `POST /v1/transfers` için
 **`Idempotency-Key` zorunlu** — aynı key orijinal yanıtı replay eder, farklı
 gövdeyle gelen aynı key 422 olur. Anahtarlar Postgres'te (go-idempotent'ın
 `Store`'u), ADR-0004. Para alanları telde **string**, JSON number reddedilir.
+
+**Hold / capture ve overdraft guard (v0.2):** `allow_negative: false` ile
+açılan hesap eksiye düşemez; `Hold` tutar rezerve eder (para hareket etmez),
+`Capture` transferi postlayıp hold'u aynı transaction'da kapatır (kısmi
+capture kalanı serbest bırakır), `Release` iptal eder, süresi dolan hold'lar
+dakikalık sweep ile düşer. `available = bakiye − aktif hold'lar`. Hesap tek
+para birimi tutar, bu değişmeyecek (ADR-0007).
 
 **`sumzero reconcile`**: banka/PSP CSV'sini (`reference,amount[,date]`,
 kuruş cinsinden imzalı) defterle referans üzerinden eşleştirir; eşleşen, tutar
