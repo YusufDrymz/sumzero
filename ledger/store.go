@@ -108,10 +108,13 @@ func (l *Ledger) Post(ctx context.Context, t *Transfer) (int64, error) {
 		return 0, err
 	}
 
+	// Store the same instant the chain hashes: Postgres keeps microseconds, so
+	// anything finer would be lost on write and break verification later.
 	postedAt := t.PostedAt
 	if postedAt.IsZero() {
 		postedAt = time.Now()
 	}
+	postedAt = postedAt.UTC().Truncate(time.Microsecond)
 
 	var id int64
 	err := l.inTx(ctx, func(q db) error {

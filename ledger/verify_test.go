@@ -2,7 +2,9 @@ package ledger_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/require"
@@ -50,6 +52,37 @@ func TestVerifyCleanLedger(t *testing.T) {
 	require.Equal(t, 3, r.Transfers)
 	require.Equal(t, 9, r.Postings)
 	require.Equal(t, 4, r.Accounts)
+}
+
+// Postgres stores timestamptz to microsecond precision. A transfer posted with
+// a finer timestamp must still verify, or the chain becomes unverifiable the
+// moment it is read back — which is how this surfaced: green on macOS, where
+// time.Now() is usually already microseconds, red on Linux.
+func TestVerifySurvivesSubMicrosecondTimestamps(t *testing.T) {
+	ctx := context.Background()
+	pool := startPostgres(t)
+	lg := ledger.New(pool)
+	openBooks(t, lg)
+
+	base := time.Date(2026, 5, 4, 10, 30, 0, 0, time.UTC)
+	for i, ns := range []int{1, 499, 500, 999, 123456789} {
+		_, err := lg.Post(ctx, &ledger.Transfer{
+			Reference: fmt.Sprintf("ns-%d", i),
+			PostedAt:  base.Add(time.Duration(ns)),
+			Postings: (&ledger.Transfer{}).
+				Debit("cash", try(100)).Credit("revenue", try(100)).Postings,
+		})
+		require.NoError(t, err)
+	}
+
+	// Now let the clock supply the precision instead of the test.
+	_, err := lg.Post(ctx, (&ledger.Transfer{Reference: "ns-now"}).
+		Debit("cash", try(100)).Credit("revenue", try(100)))
+	require.NoError(t, err)
+
+	r, err := lg.Verify(ctx)
+	require.NoError(t, err)
+	require.True(t, r.OK(), "problems: %v", r.Problems)
 }
 
 func TestVerifyCatchesTampering(t *testing.T) {
