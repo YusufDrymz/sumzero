@@ -4,8 +4,6 @@ import (
 	"context"
 	"errors"
 	"os"
-	"path/filepath"
-	"sort"
 	"sync"
 	"testing"
 	"time"
@@ -17,6 +15,7 @@ import (
 	"github.com/testcontainers/testcontainers-go/wait"
 
 	"github.com/YusufDrymz/sumzero/ledger"
+	"github.com/YusufDrymz/sumzero/migrations"
 )
 
 func try(minor int64) ledger.Money { return ledger.Amount(minor, "TRY") }
@@ -60,20 +59,12 @@ func startPostgres(t *testing.T) *pgxpool.Pool {
 	return pool
 }
 
-// applyMigrations runs every file under migrations/ in name order, the way a
-// deployment would.
+// applyMigrations sets the schema up the way a deployment would: through the
+// embedded migrations, not by reading files off disk.
 func applyMigrations(t *testing.T, pool *pgxpool.Pool) {
 	t.Helper()
-	files, err := filepath.Glob(filepath.Join("..", "migrations", "*.sql"))
+	_, err := migrations.Apply(context.Background(), pool)
 	require.NoError(t, err)
-	require.NotEmpty(t, files)
-	sort.Strings(files)
-	for _, f := range files {
-		sql, err := os.ReadFile(f)
-		require.NoError(t, err)
-		_, err = pool.Exec(context.Background(), string(sql))
-		require.NoError(t, err, f)
-	}
 }
 
 // openBooks sets up a small chart of accounts used by most tests.
