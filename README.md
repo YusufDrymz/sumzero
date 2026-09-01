@@ -9,9 +9,9 @@ REST API. Same engine either way.
 [![CI](https://github.com/YusufDrymz/sumzero/actions/workflows/ci.yml/badge.svg)](https://github.com/YusufDrymz/sumzero/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Status: early.** The engine and `verify` work against Postgres and are
-> tested there. The REST API is not written yet. Not ready for anyone's money —
-> see [Roadmap](#roadmap).
+> **Status: early.** The engine, the REST API and `verify` work against Postgres
+> and are tested there. Reconciliation is not written yet. Not ready for
+> anyone's money — see [Roadmap](#roadmap).
 
 ## Why
 
@@ -100,6 +100,49 @@ Account types and the side they carry a positive balance on:
 | `Asset`, `Expense` | debit |
 | `Liability`, `Equity`, `Income` | credit |
 
+## REST API
+
+```bash
+sumzero serve --dsn postgres://... --addr :8080
+```
+
+| | |
+|---|---|
+| `POST /v1/accounts` | open an account |
+| `GET /v1/accounts/{id}` | one account |
+| `POST /v1/accounts/{id}/archive` | close it to new postings |
+| `GET /v1/accounts/{id}/balance` | current balance, or `?as_of=<RFC3339>` |
+| `GET /v1/accounts/{id}/statement` | postings, `?from=&to=&limit=` |
+| `POST /v1/transfers` | post a transfer — **`Idempotency-Key` required** |
+| `GET /v1/transfers/{reference}` | one transfer with its postings |
+| `GET /v1/verify` | verification report; 409 when the books do not check out |
+| `GET /healthz` `GET /readyz` | liveness and readiness, deliberately separate |
+
+```bash
+curl -X POST localhost:8080/v1/transfers   -H 'Idempotency-Key: 4f3c…'   -d '{"reference":"order-9","postings":[
+        {"account":"cash",   "amount":{"amount":"10000","currency":"TRY"},"direction":"debit"},
+        {"account":"revenue","amount":{"amount":"10000","currency":"TRY"},"direction":"credit"}]}'
+```
+
+Amounts are strings on the wire, in both directions, and a JSON number is
+rejected rather than rounded.
+
+The key is not optional: a transfer that cannot be retried safely is a transfer
+whose client has no answer after a timeout. Repeating a request replays the
+original response (`Idempotent-Replay: true`); reusing a key with a different
+body is a 422. Keys live in Postgres, via
+[go-idempotent](https://github.com/YusufDrymz/go-idempotent) — see
+[ADR-0004](docs/adr/0004-idempotency-key-is-mandatory.md).
+
+Errors always have the same shape:
+
+```json
+{"error": {"code": "unbalanced", "message": "sumzero: transfer does not balance: TRY off by 100"}}
+```
+
+400 means the request was malformed, 422 means the books refuse it, 409 means it
+collided with something already recorded.
+
 ## Verify
 
 `account_balances` is a cache, so the tool refuses to trust it:
@@ -143,8 +186,8 @@ recomputes every balance from them and re-walks the hash chain.
 | 1 | Domain model, sum-zero invariant, schema, hash chain | done |
 | 2 | Postgres store: post, balance, as-of, statement, embedded mode | done |
 | 3 | `verify`: recompute balances, re-walk the chain | done |
-| 4 | REST API with mandatory idempotency keys | next |
-| 5 | Reconciliation against external records | |
+| 4 | REST API with mandatory idempotency keys | done |
+| 5 | Reconciliation against external records | next |
 
 ## Throughput
 
@@ -195,6 +238,12 @@ aralığı mimari olarak yok.
 **Yazma serileşir:** hash zinciri tek sıra olduğu için `Post` link atarken kilit
 alır. Tavan, transfer başına bir Postgres round-trip'i civarı — kendi
 ödemelerini kaydeden bir servise uygun, borsa hacmine değil (ADR-0003).
+
+**REST API** (`sumzero serve`): hesap/transfer/bakiye/ekstre uçları, `as_of`
+destekli bakiye, `/healthz` ve `/readyz` ayrı. `POST /v1/transfers` için
+**`Idempotency-Key` zorunlu** — aynı key orijinal yanıtı replay eder, farklı
+gövdeyle gelen aynı key 422 olur. Anahtarlar Postgres'te (go-idempotent'ın
+`Store`'u), ADR-0004. Para alanları telde **string**, JSON number reddedilir.
 
 **`sumzero verify`** cache'e güvenmez: her bakiyeyi posting'lerden yeniden
 hesaplar, her transferi sum-zero için yeniden kontrol eder, hash zincirini baştan
