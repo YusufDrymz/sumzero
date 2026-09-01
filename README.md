@@ -9,9 +9,9 @@ REST API. Same engine either way.
 [![CI](https://github.com/YusufDrymz/sumzero/actions/workflows/ci.yml/badge.svg)](https://github.com/YusufDrymz/sumzero/actions)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-> **Status: early.** The engine, the REST API and `verify` work against Postgres
-> and are tested there. Reconciliation is not written yet. Not ready for
-> anyone's money — see [Roadmap](#roadmap).
+> **Status: early.** Engine, REST API, `verify` and `reconcile` work against
+> Postgres and are tested there. No release yet, and no one has run it in anger.
+> Not ready for anyone's money — see [Roadmap](#roadmap).
 
 ## Why
 
@@ -113,6 +113,7 @@ sumzero serve --dsn postgres://... --addr :8080
 | `POST /v1/accounts/{id}/archive` | close it to new postings |
 | `GET /v1/accounts/{id}/balance` | current balance, or `?as_of=<RFC3339>` |
 | `GET /v1/accounts/{id}/statement` | postings, `?from=&to=&limit=` |
+| `POST /v1/accounts/{id}/reconcile` | compare the account with an external record |
 | `POST /v1/transfers` | post a transfer — **`Idempotency-Key` required** |
 | `GET /v1/transfers/{reference}` | one transfer with its postings |
 | `GET /v1/verify` | verification report; 409 when the books do not check out |
@@ -142,6 +143,31 @@ Errors always have the same shape:
 
 400 means the request was malformed, 422 means the books refuse it, 409 means it
 collided with something already recorded.
+
+## Reconcile
+
+The ledger says what should have moved. The bank says what did. `reconcile`
+lines the two up by reference and reports the difference:
+
+```console
+$ sumzero reconcile --account cash --file payouts-june.csv --from 2026-06-01 --to 2026-06-30
+cash (TRY) 2026-06-01 → 2026-06-30
+  matched 1418 · amount mismatch 3 · missing in ledger 2 · missing externally 1
+  ledger 48120050 · external 48118810 · difference 1240
+  ~ pay-88213                ledger 5000, external 4990
+  + pay-90001                3000  (external only: money moved, not recorded)
+  - pay-88790                7000  (ledger only: recorded, money did not move)
+```
+
+The CSV is `reference,amount[,date]`, amounts as signed minor units — there is
+deliberately no decimal parsing at the file boundary. Matching is by reference
+and by nothing else; fuzzy pairing on amount and date finds more matches and
+also invents some, and this tool would rather say "unmatched" than be quietly
+wrong ([ADR-0005](docs/adr/0005-reconcile-on-reference-only.md)). Exit 1 when
+the sides disagree.
+
+The same comparison is available as `POST /v1/accounts/{id}/reconcile` with the
+entries in the body.
 
 ## Verify
 
@@ -187,7 +213,8 @@ recomputes every balance from them and re-walks the hash chain.
 | 2 | Postgres store: post, balance, as-of, statement, embedded mode | done |
 | 3 | `verify`: recompute balances, re-walk the chain | done |
 | 4 | REST API with mandatory idempotency keys | done |
-| 5 | Reconciliation against external records | next |
+| 5 | Reconciliation against external records | done |
+| 6 | First release: read-through of every file, tag, go public | next |
 
 ## Throughput
 
@@ -244,6 +271,12 @@ destekli bakiye, `/healthz` ve `/readyz` ayrı. `POST /v1/transfers` için
 **`Idempotency-Key` zorunlu** — aynı key orijinal yanıtı replay eder, farklı
 gövdeyle gelen aynı key 422 olur. Anahtarlar Postgres'te (go-idempotent'ın
 `Store`'u), ADR-0004. Para alanları telde **string**, JSON number reddedilir.
+
+**`sumzero reconcile`**: banka/PSP CSV'sini (`reference,amount[,date]`,
+kuruş cinsinden imzalı) defterle referans üzerinden eşleştirir; eşleşen, tutar
+farkı, defterde eksik, dışta eksik olarak dört kovaya ayırır ve toplam farkı
+verir. Bilerek yalnız referansla eşleşir — tutar/tarih bulanık eşleşmesi yok
+(ADR-0005). API'de `POST /v1/accounts/{id}/reconcile`.
 
 **`sumzero verify`** cache'e güvenmez: her bakiyeyi posting'lerden yeniden
 hesaplar, her transferi sum-zero için yeniden kontrol eder, hash zincirini baştan
