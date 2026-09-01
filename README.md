@@ -49,8 +49,9 @@ go install github.com/YusufDrymz/sumzero/cmd/sumzero@latest   # CLI
 
 ## Usage
 
-Apply [`migrations/0001_init.sql`](migrations/0001_init.sql) with whatever tool
-you already use, then:
+Set up the schema — `sumzero migrate --dsn postgres://...` applies the
+embedded migrations and is safe to run on every deploy; or run the files in
+[`migrations/`](migrations/) with whatever tool you already use. Then:
 
 ```go
 lg := ledger.New(pool) // *pgxpool.Pool — your database
@@ -108,8 +109,15 @@ Account types and the side they carry a positive balance on:
 ## REST API
 
 ```bash
-sumzero serve --dsn postgres://... --addr :8080
+sumzero migrate --dsn postgres://...
+sumzero serve   --dsn postgres://... --addr :8080 --token "$(openssl rand -hex 32)"
 ```
+
+With `--token` (or `SUMZERO_API_TOKEN`) every `/v1` call needs
+`Authorization: Bearer <token>`; `/healthz` and `/readyz` stay open for the
+orchestrator. Without a token the API is open — `serve` says so loudly at
+start, and `GET /v1/verify` is disabled, because an unauthenticated full scan
+is a denial-of-service invitation. Put a gateway in front or set the token.
 
 | | |
 |---|---|
@@ -121,6 +129,7 @@ sumzero serve --dsn postgres://... --addr :8080
 | `GET /v1/accounts/{id}/statement` | postings, `?from=&to=&limit=` |
 | `POST /v1/accounts/{id}/reconcile` | compare the account with an external record |
 | `POST /v1/transfers` | post a transfer — **`Idempotency-Key` required** |
+| `POST /v1/transfers/{reference}/reverse` | post the mirror image, linked to the original — key required |
 | `POST /v1/holds` | reserve an amount — key required |
 | `GET /v1/holds/{reference}` | one hold |
 | `POST /v1/holds/{reference}/capture` | move the money, close the hold — key required |
@@ -141,7 +150,9 @@ rejected rather than rounded.
 The key is not optional on any write: a transfer that cannot be retried safely
 is a transfer whose client has no answer after a timeout. Repeating a request replays the
 original response (`Idempotent-Replay: true`); reusing a key with a different
-body is a 422. Keys live in Postgres, via
+body is a 422. Keys are scoped to the route, so the same key on
+`/v1/transfers` and `/v1/holds` is two requests, not one replayed into the
+wrong endpoint. Keys live in Postgres, via
 [go-idempotent](https://github.com/YusufDrymz/go-idempotent) — see
 [ADR-0004](docs/adr/0004-idempotency-key-is-mandatory.md).
 
@@ -153,6 +164,21 @@ Errors always have the same shape:
 
 400 means the request was malformed, 422 means the books refuse it, 409 means it
 collided with something already recorded.
+
+## Reversals
+
+History is never edited, so a mistake is undone with a reversal: the same
+accounts and amounts, every leg flipped, linked to the original.
+
+```go
+lg.Reverse(ctx, "order-9", "order-9-refund", "customer returned the goods")
+```
+
+The link is part of the hash chain, and an original can be reversed once. A
+reversal can itself be reversed — that is a new transfer pointing at the
+reversal, not a second reversal of the original. The overdraft guard applies:
+undoing a payout into a guarded wallet is fine, undoing a top-up out of an
+empty one is refused.
 
 ## Holds and the overdraft guard
 
@@ -262,6 +288,7 @@ recomputes every balance from them and re-walks the hash chain.
 | 5 | Reconciliation against external records | done |
 | 6 | v0.1.0 | done |
 | 7 | Holds, overdraft guard | done |
+| 7.1 | Reversals, bearer auth, `migrate`, route-scoped keys | done |
 | 8 | Per-book chains (only if the write ceiling ever binds) | later |
 
 ## Throughput
@@ -326,6 +353,12 @@ açılan hesap eksiye düşemez; `Hold` tutar rezerve eder (para hareket etmez),
 capture kalanı serbest bırakır), `Release` iptal eder, süresi dolan hold'lar
 dakikalık sweep ile düşer. `available = bakiye − aktif hold'lar`. Hesap tek
 para birimi tutar, bu değişmeyecek (ADR-0007).
+
+**v0.3:** `sumzero migrate` (şema binary'ye gömülü, her deploy'da güvenle
+koşar); `--token` ile bearer auth, token yoksa API açık ve `/v1/verify`
+kapalı; `Reverse` — orijinale bağlı, zincirde hash'li, bir kez; idempotency
+key'ler route'a bağlı; süresi dolmuş hold sweep'i beklemeden capture'da
+reddedilir.
 
 **`sumzero reconcile`**: banka/PSP CSV'sini (`reference,amount[,date]`,
 kuruş cinsinden imzalı) defterle referans üzerinden eşleştirir; eşleşen, tutar

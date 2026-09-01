@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Added
+- `Reverse` and `POST /v1/transfers/{reference}/reverse`: the mirror transfer,
+  linked to the original through `reverses_transfer_id`, once per original.
+  The link is hashed into the chain; earlier digests are unaffected.
+- `sumzero migrate`: the schema ships inside the binary and applies
+  idempotently, recorded in `sumzero_migrations`.
+- Bearer authentication for the API (`--token` / `SUMZERO_API_TOKEN`).
+  Without it `serve` warns at start and `GET /v1/verify` returns 403.
+- golangci-lint in CI.
+
+### Changed
+- Idempotency keys are scoped to method and path.
+- `httpapi.New` takes a `Config` instead of positional arguments.
+
+### Fixed
+- `Capture` on a past-due hold that the sweep had not yet marked went through.
+  It is now refused with `hold_expired` and the hold is marked on the spot.
+
 ## 0.2.0 — 2026-09-01
 
 ### Added
