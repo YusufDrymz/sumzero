@@ -26,6 +26,11 @@ in id order, so two transfers over the same accounts cannot deadlock each other.
 - That ceiling is fine for the target: services recording payments and payouts
   in their own database. It is not fine for exchange-grade volume, which is what
   TigerBeetle is for, and the README should not pretend otherwise.
+- In embedded mode (`NewTx`) the lock is released when the *caller's*
+  transaction ends, not when `Post` returns. A caller that posts early and
+  commits late holds every other writer for the duration. The README says to
+  post late and commit promptly; that is the whole mitigation, and it is the
+  caller's responsibility.
 - If the ceiling ever binds, the way out is per-currency or per-book chains
   rather than dropping the chain. That is a schema change, so the option is kept
   open by keeping the lock key a constant in one place.

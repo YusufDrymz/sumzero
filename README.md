@@ -93,6 +93,11 @@ if err != nil {
 return tx.Commit(ctx)
 ```
 
+One caveat: `Post` takes the hash-chain lock, and a lock lives until the
+transaction ends — which in embedded mode is *your* commit. Post the transfer
+as late as you can and commit promptly; a caller that posts first and then
+spends seconds on other work is holding every other writer behind it.
+
 Account types and the side they carry a positive balance on:
 
 | Type | Normal side |
