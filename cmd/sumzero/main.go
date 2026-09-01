@@ -22,16 +22,22 @@ import (
 
 	"github.com/YusufDrymz/sumzero/httpapi"
 	"github.com/YusufDrymz/sumzero/ledger"
+	"github.com/YusufDrymz/sumzero/migrations"
 )
 
 const usage = `sumzero — double-entry ledger for Postgres
 
 usage:
-  sumzero serve  [--dsn URL] [--addr HOST:PORT] [--idempotency-ttl DUR]
+  sumzero migrate [--dsn URL]
+  sumzero serve  [--dsn URL] [--addr HOST:PORT] [--idempotency-ttl DUR] [--token T]
   sumzero verify [--dsn URL] [--json]
   sumzero reconcile --account ID --file bank.csv --from DATE --to DATE [--json]
 
-  serve      run the REST API. POST /v1/transfers requires an Idempotency-Key.
+  migrate    apply the schema (idempotent; safe to run on every deploy).
+  serve      run the REST API. Every write requires an Idempotency-Key. With
+             --token (or SUMZERO_API_TOKEN) every /v1 call needs
+             "Authorization: Bearer <token>"; without it the API is open and
+             says so loudly at start, and /v1/verify is disabled.
   verify     recompute every balance from the postings and re-walk the hash
              chain. Exits non-zero if the ledger does not check out.
   reconcile  compare an account against an external CSV (reference,amount
@@ -55,6 +61,8 @@ func run(args []string) error {
 	}
 
 	switch args[0] {
+	case "migrate":
+		return migrate(args[1:])
 	case "serve":
 		return serve(args[1:])
 	case "verify":
@@ -69,11 +77,43 @@ func run(args []string) error {
 	}
 }
 
+func migrate(args []string) error {
+	fs := flag.NewFlagSet("migrate", flag.ExitOnError)
+	dsn := fs.String("dsn", os.Getenv("DATABASE_URL"), "postgres connection string")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dsn == "" {
+		return fmt.Errorf("no database: pass --dsn or set DATABASE_URL")
+	}
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, *dsn)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+
+	applied, err := migrations.Apply(ctx, pool)
+	for _, name := range applied {
+		fmt.Println("applied", name)
+	}
+	if err != nil {
+		return err
+	}
+	if len(applied) == 0 {
+		fmt.Println("up to date")
+	}
+	return nil
+}
+
 func serve(args []string) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	dsn := fs.String("dsn", os.Getenv("DATABASE_URL"), "postgres connection string")
 	addr := fs.String("addr", envOr("SUMZERO_ADDR", ":8080"), "listen address")
 	ttl := fs.Duration("idempotency-ttl", 24*time.Hour, "how long a completed idempotency key is replayable")
+	token := fs.String("token", os.Getenv("SUMZERO_API_TOKEN"), "bearer token required on every /v1 call")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -97,9 +137,13 @@ func serve(args []string) error {
 	keys := ledger.NewIdempotencyStore(pool, *ttl)
 	go housekeeping(ctx, ledger.New(pool), keys, log)
 
+	if *token == "" {
+		log.Warn("API is unauthenticated: anyone who can reach this port can post transfers. " +
+			"Set --token or SUMZERO_API_TOKEN, or keep it behind a gateway.")
+	}
 	srv := &http.Server{
 		Addr:              *addr,
-		Handler:           httpapi.New(pool, keys, log),
+		Handler:           httpapi.New(pool, httpapi.Config{Keys: keys, Log: log, Token: *token}),
 		ReadHeaderTimeout: 10 * time.Second,
 		IdleTimeout:       60 * time.Second,
 	}
