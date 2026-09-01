@@ -95,7 +95,7 @@ func (l *Ledger) Statement(ctx context.Context, accountID string, opt StatementO
 	}
 	defer rows.Close()
 
-	var out []Entry
+	out := []Entry{}
 	for rows.Next() {
 		var e Entry
 		if err := rows.Scan(&e.TransferID, &e.Reference, &e.Description, &e.PostedAt,
@@ -149,20 +149,18 @@ func nullTime(t time.Time) any {
 // TransferByReference returns a posted transfer with its postings.
 func (l *Ledger) TransferByReference(ctx context.Context, reference string) (Transfer, int64, error) {
 	var (
-		id       int64
-		t        Transfer
-		postedAt time.Time
+		id int64
+		t  Transfer
 	)
 	err := l.db.QueryRow(ctx, `
 		SELECT id, reference, description, posted_at FROM transfers WHERE reference = $1`,
-		reference).Scan(&id, &t.Reference, &t.Description, &postedAt)
+		reference).Scan(&id, &t.Reference, &t.Description, &t.PostedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Transfer{}, 0, fmt.Errorf("%w: %s", ErrUnknownTransfer, reference)
 	}
 	if err != nil {
 		return Transfer{}, 0, err
 	}
-	t.PostedAt = postedAt
 
 	rows, err := l.db.Query(ctx, `
 		SELECT account_id, amount, currency, direction FROM postings

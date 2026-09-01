@@ -118,16 +118,16 @@ func (l *Ledger) checkBalancesMatchPostings(ctx context.Context, r *Report) erro
 
 	for rows.Next() {
 		var (
-			account       string
-			cached, real_ int64
+			account              string
+			cached, fromPostings int64
 		)
-		if err := rows.Scan(&account, &cached, &real_); err != nil {
+		if err := rows.Scan(&account, &cached, &fromPostings); err != nil {
 			return err
 		}
 		r.Problems = append(r.Problems, Problem{
 			Kind:    "balance-drift",
 			Subject: account,
-			Detail:  fmt.Sprintf("cached %d, postings say %d (off by %d)", cached, real_, cached-real_),
+			Detail:  fmt.Sprintf("cached %d, postings say %d (off by %d)", cached, fromPostings, cached-fromPostings),
 		})
 	}
 	return rows.Err()

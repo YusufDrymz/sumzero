@@ -20,8 +20,8 @@ import (
 // IdempotencyHeader is the header a write must carry.
 const IdempotencyHeader = "Idempotency-Key"
 
-// Server holds the dependencies of the HTTP layer.
-type Server struct {
+// server holds the dependencies of the HTTP layer.
+type server struct {
 	lg   *ledger.Ledger
 	pool *pgxpool.Pool
 	log  *slog.Logger
@@ -33,7 +33,7 @@ func New(pool *pgxpool.Pool, keys idempotent.Store, log *slog.Logger) http.Handl
 	if log == nil {
 		log = slog.Default()
 	}
-	s := &Server{lg: ledger.New(pool), pool: pool, log: log}
+	s := &server{lg: ledger.New(pool), pool: pool, log: log}
 
 	mux := http.NewServeMux()
 
@@ -79,7 +79,7 @@ func requireIdempotencyKey(next http.Handler) http.Handler {
 	})
 }
 
-func (s *Server) ready(w http.ResponseWriter, r *http.Request) {
+func (s *server) ready(w http.ResponseWriter, r *http.Request) {
 	if err := s.pool.Ping(r.Context()); err != nil {
 		s.log.WarnContext(r.Context(), "readiness check failed", "err", err)
 		writeJSON(w, http.StatusServiceUnavailable, map[string]string{"status": "unavailable"})
@@ -94,7 +94,7 @@ type accountRequest struct {
 	Currency string             `json:"currency"`
 }
 
-func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
+func (s *server) createAccount(w http.ResponseWriter, r *http.Request) {
 	var req accountRequest
 	if !decode(w, r, &req) {
 		return
@@ -108,7 +108,7 @@ func (s *Server) createAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, a)
 }
 
-func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
+func (s *server) getAccount(w http.ResponseWriter, r *http.Request) {
 	a, err := s.lg.Account(r.Context(), r.PathValue("id"))
 	if err != nil {
 		s.fail(w, r, err)
@@ -117,7 +117,7 @@ func (s *Server) getAccount(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, a)
 }
 
-func (s *Server) archiveAccount(w http.ResponseWriter, r *http.Request) {
+func (s *server) archiveAccount(w http.ResponseWriter, r *http.Request) {
 	if err := s.lg.Archive(r.Context(), r.PathValue("id")); err != nil {
 		s.fail(w, r, err)
 		return
@@ -131,7 +131,7 @@ type balanceResponse struct {
 	AsOf    *time.Time   `json:"as_of,omitempty"`
 }
 
-func (s *Server) getBalance(w http.ResponseWriter, r *http.Request) {
+func (s *server) getBalance(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 
 	if raw := r.URL.Query().Get("as_of"); raw != "" {
@@ -157,7 +157,7 @@ func (s *Server) getBalance(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, balanceResponse{Account: id, Balance: bal})
 }
 
-func (s *Server) getStatement(w http.ResponseWriter, r *http.Request) {
+func (s *server) getStatement(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	var opt ledger.StatementOptions
 
@@ -188,9 +188,6 @@ func (s *Server) getStatement(w http.ResponseWriter, r *http.Request) {
 		s.fail(w, r, err)
 		return
 	}
-	if entries == nil {
-		entries = []ledger.Entry{}
-	}
 	writeJSON(w, http.StatusOK, map[string]any{"entries": entries})
 }
 
@@ -206,7 +203,7 @@ type transferResponse struct {
 	Transfer *ledger.Transfer `json:"transfer"`
 }
 
-func (s *Server) postTransfer(w http.ResponseWriter, r *http.Request) {
+func (s *server) postTransfer(w http.ResponseWriter, r *http.Request) {
 	var req transferRequest
 	if !decode(w, r, &req) {
 		return
@@ -229,7 +226,7 @@ func (s *Server) postTransfer(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, transferResponse{ID: id, Transfer: t})
 }
 
-func (s *Server) getTransfer(w http.ResponseWriter, r *http.Request) {
+func (s *server) getTransfer(w http.ResponseWriter, r *http.Request) {
 	t, id, err := s.lg.TransferByReference(r.Context(), r.PathValue("reference"))
 	if err != nil {
 		s.fail(w, r, err)
@@ -246,7 +243,7 @@ type reconcileRequest struct {
 
 // reconcile is a POST because the external record travels in the body, but it
 // writes nothing: the report is the whole output.
-func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
+func (s *server) reconcile(w http.ResponseWriter, r *http.Request) {
 	var req reconcileRequest
 	if !decode(w, r, &req) {
 		return
@@ -268,7 +265,7 @@ func (s *Server) reconcile(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, report)
 }
 
-func (s *Server) verify(w http.ResponseWriter, r *http.Request) {
+func (s *server) verify(w http.ResponseWriter, r *http.Request) {
 	report, err := s.lg.Verify(r.Context())
 	if err != nil {
 		s.fail(w, r, err)
@@ -284,7 +281,7 @@ func (s *Server) verify(w http.ResponseWriter, r *http.Request) {
 }
 
 // fail logs unexpected errors and writes the mapped response.
-func (s *Server) fail(w http.ResponseWriter, r *http.Request, err error) {
+func (s *server) fail(w http.ResponseWriter, r *http.Request, err error) {
 	if isInternal(err) {
 		s.log.ErrorContext(r.Context(), "request failed",
 			"method", r.Method, "path", r.URL.Path, "err", err)

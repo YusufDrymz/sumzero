@@ -13,7 +13,7 @@ import (
 type ExternalEntry struct {
 	Reference string    `json:"reference"`
 	Amount    Money     `json:"amount"`
-	Date      time.Time `json:"date,omitempty"`
+	Date      time.Time `json:"date,omitzero"`
 }
 
 // Match is one reference seen on both sides.
@@ -35,15 +35,15 @@ type ReconcileReport struct {
 	Matched           []Match         `json:"matched"`
 	AmountMismatch    []Match         `json:"amount_mismatch"`
 	MissingInLedger   []ExternalEntry `json:"missing_in_ledger"`  // money moved, nobody recorded it
-	MissingExternally []ledgerLine    `json:"missing_externally"` // recorded, money never moved
+	MissingExternally []LedgerLine    `json:"missing_externally"` // recorded, money never moved
 
 	LedgerTotal   int64 `json:"ledger_total"`
 	ExternalTotal int64 `json:"external_total"`
 	Difference    int64 `json:"difference"` // ledger minus external
 }
 
-// ledgerLine is a ledger-side entry with no external counterpart.
-type ledgerLine struct {
+// LedgerLine is a ledger-side entry with no external counterpart.
+type LedgerLine struct {
 	Reference string    `json:"reference"`
 	Amount    Money     `json:"amount"`
 	PostedAt  time.Time `json:"posted_at"`
@@ -70,7 +70,7 @@ func (l *Ledger) Reconcile(ctx context.Context, accountID string, from, to time.
 	r := ReconcileReport{
 		Account: accountID, Currency: acc.Currency, From: from, To: to,
 		Matched: []Match{}, AmountMismatch: []Match{},
-		MissingInLedger: []ExternalEntry{}, MissingExternally: []ledgerLine{},
+		MissingInLedger: []ExternalEntry{}, MissingExternally: []LedgerLine{},
 	}
 
 	// Ledger side: net movement per reference, on the account's normal side so
@@ -87,9 +87,9 @@ func (l *Ledger) Reconcile(ctx context.Context, accountID string, from, to time.
 	}
 	defer rows.Close()
 
-	ledgerSide := make(map[string]ledgerLine)
+	ledgerSide := make(map[string]LedgerLine)
 	for rows.Next() {
-		var line ledgerLine
+		var line LedgerLine
 		var raw int64
 		if err := rows.Scan(&line.Reference, &line.PostedAt, &raw); err != nil {
 			return r, err
