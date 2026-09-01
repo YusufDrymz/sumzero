@@ -95,7 +95,7 @@ func serve(args []string) error {
 
 	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
 	keys := ledger.NewIdempotencyStore(pool, *ttl)
-	go sweepKeys(ctx, keys, log)
+	go housekeeping(ctx, ledger.New(pool), keys, log)
 
 	srv := &http.Server{
 		Addr:              *addr,
@@ -126,18 +126,26 @@ func serve(args []string) error {
 	return srv.Shutdown(shutdownCtx)
 }
 
-// sweepKeys drops expired idempotency keys once an hour. Missing a sweep is
-// harmless; the table just holds a few more rows until the next one.
-func sweepKeys(ctx context.Context, keys *ledger.IdempotencyStore, log *slog.Logger) {
-	tick := time.NewTicker(time.Hour)
-	defer tick.Stop()
+// housekeeping expires past-due holds every minute and drops expired
+// idempotency keys every hour. Holds matter more: until a hold is expired it
+// still reserves money, so a slow sweep is a slow refund of availability.
+func housekeeping(ctx context.Context, lg *ledger.Ledger, keys *ledger.IdempotencyStore, log *slog.Logger) {
+	holds := time.NewTicker(time.Minute)
+	defer holds.Stop()
+	sweep := time.NewTicker(time.Hour)
+	defer sweep.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
-		case <-tick.C:
-			n, err := keys.Sweep(ctx)
-			if err != nil {
+		case <-holds.C:
+			if n, err := lg.ExpireHolds(ctx); err != nil {
+				log.Warn("hold expiry failed", "err", err)
+			} else if n > 0 {
+				log.Info("holds expired", "count", n)
+			}
+		case <-sweep.C:
+			if n, err := keys.Sweep(ctx); err != nil {
 				log.Warn("idempotency sweep failed", "err", err)
 			} else if n > 0 {
 				log.Info("idempotency keys swept", "deleted", n)
