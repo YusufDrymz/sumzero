@@ -4,22 +4,29 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/YusufDrymz/sumzero/httpapi"
 	"github.com/YusufDrymz/sumzero/ledger"
 )
 
 const usage = `sumzero — double-entry ledger for Postgres
 
 usage:
+  sumzero serve  [--dsn URL] [--addr HOST:PORT] [--idempotency-ttl DUR]
   sumzero verify [--dsn URL] [--json]
 
+  serve    run the REST API. POST /v1/transfers requires an Idempotency-Key.
   verify   recompute every balance from the postings and re-walk the hash
            chain. Exits non-zero if the ledger does not check out.
 
@@ -40,6 +47,8 @@ func run(args []string) error {
 	}
 
 	switch args[0] {
+	case "serve":
+		return serve(args[1:])
 	case "verify":
 		return verify(args[1:])
 	case "-h", "--help", "help":
@@ -48,6 +57,67 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q (try --help)", args[0])
 	}
+}
+
+func serve(args []string) error {
+	fs := flag.NewFlagSet("serve", flag.ExitOnError)
+	dsn := fs.String("dsn", os.Getenv("DATABASE_URL"), "postgres connection string")
+	addr := fs.String("addr", envOr("SUMZERO_ADDR", ":8080"), "listen address")
+	ttl := fs.Duration("idempotency-ttl", 24*time.Hour, "how long a completed idempotency key is replayable")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	if *dsn == "" {
+		return fmt.Errorf("no database: pass --dsn or set DATABASE_URL")
+	}
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, *dsn)
+	if err != nil {
+		return err
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		return fmt.Errorf("cannot reach the database: %w", err)
+	}
+
+	log := slog.New(slog.NewJSONHandler(os.Stdout, nil))
+	srv := &http.Server{
+		Addr:              *addr,
+		Handler:           httpapi.New(pool, ledger.NewIdempotencyStore(pool, *ttl), log),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	errc := make(chan error, 1)
+	go func() {
+		log.Info("listening", "addr", *addr)
+		if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+			errc <- err
+		}
+	}()
+
+	select {
+	case err := <-errc:
+		return err
+	case <-ctx.Done():
+	}
+
+	// Let in-flight requests finish: a transfer cut off mid-write would leave
+	// the caller not knowing whether the money moved.
+	log.Info("shutting down")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	return srv.Shutdown(shutdownCtx)
+}
+
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
 }
 
 func verify(args []string) error {
