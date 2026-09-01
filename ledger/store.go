@@ -55,7 +55,7 @@ func (l *Ledger) CreateAccount(ctx context.Context, a Account) error {
 		return fmt.Errorf("%w: %q", ErrInvalidCurrency, a.Currency)
 	}
 
-	err := l.inTx(ctx, func(q db) error {
+	return l.inTx(ctx, func(q db) error {
 		tag, err := q.Exec(ctx, `
 			INSERT INTO accounts (id, type, currency) VALUES ($1, $2, $3)
 			ON CONFLICT (id) DO NOTHING`, a.ID, string(a.Type), a.Currency)
@@ -68,10 +68,6 @@ func (l *Ledger) CreateAccount(ctx context.Context, a Account) error {
 		_, err = q.Exec(ctx, `INSERT INTO account_balances (account_id) VALUES ($1)`, a.ID)
 		return err
 	})
-	if err != nil {
-		return err
-	}
-	return nil
 }
 
 // Account returns one account.
@@ -142,7 +138,9 @@ func (l *Ledger) Post(ctx context.Context, t *Transfer) (int64, error) {
 
 		// The chain is a single global sequence, so links must be taken one at
 		// a time. This serialises writes on purpose: a chain with a race in it
-		// proves nothing. See docs/adr/0003.
+		// proves nothing. See docs/adr/0003. The lock lives until the
+		// transaction ends — in embedded mode that is the caller's commit, so a
+		// caller that posts early and commits late stalls every other writer.
 		if _, err := q.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, chainLockKey); err != nil {
 			return err
 		}
@@ -216,7 +214,9 @@ func (l *Ledger) lockAccounts(ctx context.Context, q db, t *Transfer) (map[strin
 
 // applyBalances folds the transfer into the materialised balances. Amounts are
 // summed per account first so a transfer touching one account twice produces a
-// single update.
+// single update. It upserts rather than updates: an account created with plain
+// SQL has no balance row yet, and a silent zero-row UPDATE would leave the
+// cache drifting until the next verify.
 func (l *Ledger) applyBalances(ctx context.Context, q db, t *Transfer) error {
 	delta := make(map[string]int64, len(t.Postings))
 	order := make([]string, 0, len(t.Postings))
@@ -232,8 +232,10 @@ func (l *Ledger) applyBalances(ctx context.Context, q db, t *Transfer) error {
 			continue
 		}
 		_, err := q.Exec(ctx, `
-			UPDATE account_balances SET balance = balance + $2, updated_at = now()
-			WHERE account_id = $1`, acc, delta[acc])
+			INSERT INTO account_balances (account_id, balance) VALUES ($1, $2)
+			ON CONFLICT (account_id) DO UPDATE
+			SET balance = account_balances.balance + excluded.balance, updated_at = now()`,
+			acc, delta[acc])
 		if err != nil {
 			return err
 		}
@@ -252,7 +254,7 @@ func (l *Ledger) inTx(ctx context.Context, fn func(db) error) error {
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx) //nolint:errcheck // no-op after a successful commit
+	defer tx.Rollback(ctx) // no-op after a successful commit
 
 	if err := fn(tx); err != nil {
 		return err
