@@ -16,4 +16,5 @@ var (
 	ErrInvalidDirection   = errors.New("sumzero: invalid posting direction")
 	ErrMissingReference   = errors.New("sumzero: transfer reference is required")
 	ErrDuplicateReference = errors.New("sumzero: transfer reference already posted")
+	ErrUnknownTransfer    = errors.New("sumzero: unknown transfer")
 )

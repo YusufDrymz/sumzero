@@ -1,6 +1,7 @@
 package ledger
 
 import (
+	"encoding/json"
 	"fmt"
 	"strconv"
 )
@@ -31,6 +32,34 @@ func (m Money) String() string {
 // than no ledger.
 func (m Money) MarshalJSON() ([]byte, error) {
 	return fmt.Appendf(nil, `{"amount":%q,"currency":%q}`, strconv.FormatInt(m.Amount, 10), m.Currency), nil
+}
+
+// UnmarshalJSON accepts only the string form. A bare JSON number is rejected
+// rather than accepted-and-rounded: if a client is sending money as a number,
+// the right time to find out is now.
+func (m *Money) UnmarshalJSON(b []byte) error {
+	var raw struct {
+		Amount   json.RawMessage `json:"amount"`
+		Currency string          `json:"currency"`
+	}
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	if len(raw.Amount) == 0 || raw.Amount[0] != '"' {
+		return fmt.Errorf("sumzero: amount must be a string of minor units, got %s", raw.Amount)
+	}
+
+	var digits string
+	if err := json.Unmarshal(raw.Amount, &digits); err != nil {
+		return err
+	}
+	n, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil {
+		return fmt.Errorf("sumzero: amount %q is not an integer: %w", digits, err)
+	}
+
+	m.Amount, m.Currency = n, raw.Currency
+	return nil
 }
 
 func validCurrency(c string) bool {

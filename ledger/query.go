@@ -145,3 +145,39 @@ func nullTime(t time.Time) any {
 	}
 	return t
 }
+
+// TransferByReference returns a posted transfer with its postings.
+func (l *Ledger) TransferByReference(ctx context.Context, reference string) (Transfer, int64, error) {
+	var (
+		id       int64
+		t        Transfer
+		postedAt time.Time
+	)
+	err := l.db.QueryRow(ctx, `
+		SELECT id, reference, description, posted_at FROM transfers WHERE reference = $1`,
+		reference).Scan(&id, &t.Reference, &t.Description, &postedAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return Transfer{}, 0, fmt.Errorf("%w: %s", ErrUnknownTransfer, reference)
+	}
+	if err != nil {
+		return Transfer{}, 0, err
+	}
+	t.PostedAt = postedAt
+
+	rows, err := l.db.Query(ctx, `
+		SELECT account_id, amount, currency, direction FROM postings
+		WHERE transfer_id = $1 ORDER BY id`, id)
+	if err != nil {
+		return Transfer{}, 0, err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var p Posting
+		if err := rows.Scan(&p.Account, &p.Amount.Amount, &p.Amount.Currency, &p.Dir); err != nil {
+			return Transfer{}, 0, err
+		}
+		t.Postings = append(t.Postings, p)
+	}
+	return t, id, rows.Err()
+}
